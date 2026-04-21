@@ -1,0 +1,1079 @@
+{% extends "base.html" %}
+
+{% block title %}模型监控 - 个人AI理财助手{% endblock %}
+{% block page_title %}模型监控{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+.monitor-kpi-note { font-size: 0.82rem; color: #6c757d; }
+.monitor-chip { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; margin-right: 6px; margin-bottom: 6px; }
+.monitor-ok { background: #e8f7ee; color: #17824c; }
+.monitor-warn { background: #fff8e6; color: #9a6b00; }
+.monitor-risk { background: #fdecec; color: #bf2f45; }
+.monitor-neutral { background: #eef2f6; color: #52606d; }
+.monitor-box { border: 1px solid #e9ecef; border-radius: 12px; padding: 12px; background: #fff; }
+.monitor-row-risk td { background: #fff7f7; }
+.monitor-row-warning td { background: #fffdf6; }
+.model-monitor-page .stat-card { overflow: hidden; }
+.model-monitor-page .stat-card .stat-value { font-size: clamp(1rem, 1.8vw, 1.5rem); line-height: 1.2; word-break: break-word; white-space: normal; }
+.model-monitor-page .stat-card .stat-label { font-size: 0.8rem; }
+#monitorCurrentVersion { font-size: 0.8rem !important; font-weight: 700; }
+#monitorOverallStatus, #monitorPassedModels, #monitorAvgBrier { font-size: clamp(1.05rem, 2vw, 1.6rem); }
+.monitor-current-pill { display: block; margin: 3px 0; padding: 3px 7px; border-radius: 8px; background: #eef6ff; color: #195b8a; font-size: 0.72rem; line-height: 1.25; overflow-wrap: anywhere; }
+.monitor-summary-strip { border: 1px dashed #d8e2ee; border-radius: 10px; padding: 10px 12px; background: #fafcff; }
+#assetTrainingTableBody td { font-size: 0.82rem; }
+.trend-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.trend-subnote { color: #6c757d; font-size: 0.82rem; }
+#trendQuickFilters .btn { border-radius: 999px; }
+#accuracyTrendHighlights { min-height: 28px; }
+.training-progress-card { border: 1px solid #e6edf5; border-radius: 12px; background: linear-gradient(180deg, #fbfdff 0%, #f6f9fc 100%); }
+#trainingProgressPercent { font-size: 1.1rem; font-weight: 700; color: #1f3b57; }
+#trainingProgressBar { transition: width 0.35s ease; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid model-monitor-page">
+    <div class="row mb-4">
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="monitorOverallStatus">--</div><div class="stat-label">模型总状态</div></div></div>
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="monitorPassedModels">--</div><div class="stat-label">通过门槛模型</div></div></div>
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="monitorAvgBrier">--</div><div class="stat-label">平均 Brier</div></div></div>
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="monitorCurrentVersion">--</div><div class="stat-label">当前激活版本</div></div></div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+                <div class="fw-bold">模型监控中心</div>
+                <div class="monitor-kpi-note" id="monitorUpdatedAt">更新时间：--</div>
+            </div>
+            <div>
+                <button class="btn btn-custom" id="retrainBtn"><i class="fas fa-sync-alt"></i> 重新训练</button>
+                <button class="btn btn-outline-secondary ms-2" id="exportModelBtn"><i class="fas fa-download"></i> 导出模型</button>
+                <button class="btn btn-outline-secondary ms-2" id="importModelBtn"><i class="fas fa-upload"></i> 导入模型</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4 training-progress-card">
+        <div class="card-header"><i class="fas fa-spinner"></i> 模型训练进度</div>
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                <div>
+                    <div class="fw-semibold" id="trainingProgressTitle">当前无训练任务</div>
+                    <div class="small text-muted" id="trainingProgressMeta">等待手动重训或后台调度</div>
+                </div>
+                <div id="trainingProgressPercent">0%</div>
+            </div>
+            <div class="progress" style="height: 14px;">
+                <div id="trainingProgressBar" class="progress-bar bg-secondary" role="progressbar" style="width: 0%">0%</div>
+            </div>
+            <div class="small text-muted mt-2" id="trainingProgressDetails">—</div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-layer-group"></i> 模型总览单表</div>
+        <div class="card-body">
+            <div id="assetTrainingSummary" class="small text-muted mb-3">加载中...</div>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead>
+                        <tr>
+                            <th>资产类型</th>
+                            <th>周期</th>
+                            <th>当前激活版本</th>
+                            <th>历史回测结果</th>
+                            <th>样本内结果</th>
+                            <th>门槛状态</th>
+                            <th>概率健康</th>
+                            <th>最近训练</th>
+                            <th>状态</th>
+                            <th>备注</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="assetTrainingTableBody">
+                        <tr><td colspan="11" class="text-muted">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-clock-rotate-left"></i> 版本与效果摘要</div>
+        <div class="card-body">
+            <div id="versionStatusHint" class="small text-muted mb-2">加载中...</div>
+            <div id="periodComparisonBox" class="monitor-summary-strip small text-muted">加载中...</div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-shield-alt"></i> 模型门槛摘要</div>
+        <div class="card-body">
+            <div class="mb-2 small text-muted" id="modelGateSummary">加载中...</div>
+            <div id="modelGateChips" class="small text-muted">加载中...</div>
+            <div id="reliabilityCoverageAlerts" class="small text-muted mt-3">加载中...</div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span><i class="fas fa-chart-line"></i> 模型效果趋势总览</span>
+            <div id="trendModeSwitch"></div>
+        </div>
+        <div class="card-body">
+            <div class="trend-toolbar mb-2">
+                <div class="trend-subnote">支持查看多资产当前效果对比，也可切回训练趋势查看最近训练轨迹。</div>
+                <div id="trendQuickFilters"></div>
+            </div>
+            <div id="accuracyTrendHighlights" class="mb-2 small"></div>
+            <div id="accuracyTrendChart" style="height:460px;"></div>
+            <div id="accuracyTrendDateRange" class="small text-muted text-center mt-2">最近50次训练结果</div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-chart-bar"></i> 特征重要性</div>
+        <div class="card-body"><div id="featureImportanceChart" style="height:320px;"></div></div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-balance-scale"></i> 概率健康摘要</div>
+        <div class="card-body">
+            <div id="probabilityHealthSummary" class="small text-muted mb-3">加载中...</div>
+            <div id="probabilityHealthAlerts" class="mb-0"></div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-lg-6 mb-3">
+            <div class="card h-100">
+                <div class="card-header"><i class="fas fa-link"></i> 学习闭环状态</div>
+                <div class="card-body" id="learningLoopBox"><div class="text-muted small">加载中...</div></div>
+            </div>
+        </div>
+        <div class="col-lg-6 mb-3">
+            <div class="card h-100">
+                <div class="card-header"><i class="fas fa-rotate"></i> 优化闭环进度</div>
+                <div class="card-body" id="optimizationLoopBox"><div class="text-muted small">加载中...</div></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let accuracyTrendChart = null;
+let featureImportanceChart = null;
+let monitorTableState = {};
+let currentTrendMode = 'assets';
+let currentTrendFilter = 'all';
+let trendPayloadState = { rawTrend: [], assetRows: [] };
+
+const featureNameMap = {
+    rsi: 'RSI',
+    macd_hist: 'MACD柱',
+    macd_signal: 'MACD信号',
+    volume_ratio: '量比',
+    amount_ratio: '成交额比',
+    volatility: '波动率',
+    volatility_5d: '5日波动率',
+    sentiment_score: '情绪得分',
+    pe_percentile: 'PE分位',
+    pb_percentile: 'PB分位',
+    return_5d: '5日收益',
+    return_10d: '10日收益',
+    return_20d: '20日收益',
+    bb_position: '布林位置',
+    money_flow: '资金流',
+    net_mf_amount: '主力净流入',
+    north_money: '北向资金',
+    h_money: '港股资金',
+    rzye: '融资余额',
+    rzmre: '融资买入额',
+    price_ma5_ratio: '价/MA5',
+    price_ma20_ratio: '价/MA20',
+    price_ma60_ratio: '价/MA60',
+    price_ma200_ratio: '价/MA200',
+    price_position: '价格位置',
+    price_position_60d: '60日位置',
+    breakout_strength: '突破强度',
+    high_low_ratio: '高低位比',
+    momentum: '动量',
+    uptrend_strength: '上升趋势强度',
+    long_term_trend: '长期趋势',
+    atr: 'ATR波动',
+    dollar_proxy: '美元因子',
+    risk_off_proxy: '避险因子',
+    gold_oil_ratio: '金油比'
+};
+const assetTypeMap = {
+    a_stock: 'A股', hk_stock: '港股', us_stock: '美股', fund: '基金', active_fund: '主动基金',
+    etf: 'ETF', gold: '黄金', silver: '白银'
+};
+
+function fmtPct(value, digits = 1, fallback = '--') {
+    if (value === null || value === undefined || value === '') return fallback;
+    const num = Number(value);
+    if (!Number.isFinite(num) || Number.isNaN(num)) return fallback;
+    return `${num.toFixed(digits)}%`;
+}
+
+function fmtNum(value, digits = 2, fallback = '--') {
+    if (value === null || value === undefined || value === '') return fallback;
+    const num = Number(value);
+    if (!Number.isFinite(num) || Number.isNaN(num)) return fallback;
+    return num.toFixed(digits);
+}
+
+function formatTimeText(ts) {
+    if (!ts) return '--';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return ts;
+    return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatDateOnly(ts) {
+    if (!ts) return '--';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return ts;
+    return d.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
+}
+
+function getStatusBadge(status) {
+    if (status === 'healthy' || status === 'ok' || status === 'target_met') return '<span class="monitor-chip monitor-ok">健康</span>';
+    if (status === 'warning' || status === 'below_threshold' || status === 'max_rounds_reached') return '<span class="monitor-chip monitor-warn">关注</span>';
+    if (status === 'risk' || status === 'error') return '<span class="monitor-chip monitor-risk">风险</span>';
+    return '<span class="monitor-chip monitor-neutral">待观察</span>';
+}
+
+function getOptimizationAdvice(item) {
+    const probabilityText = String(item.probability_status || '');
+    const gateText = String(item.gate_status || '');
+    const noteText = String(item.notes || '');
+    const hasRisk = item.status === 'risk' || probabilityText.includes('D') || noteText.includes('过拟合风险高') || gateText.includes('需立即处理');
+    const hasWarn = !hasRisk && (item.status === 'warning' || probabilityText.includes('C') || noteText.includes('偏高') || gateText.includes('建议降权') || gateText.includes('优先重训'));
+
+    if (hasRisk) {
+        return {
+            chip: '<span class="monitor-chip monitor-risk">建议停用/重训</span>',
+            note: '当前不宜继续放大信号，建议先降级或重训。',
+            rowClass: 'monitor-row-risk',
+        };
+    }
+    if (hasWarn) {
+        return {
+            chip: '<span class="monitor-chip monitor-warn">建议降权</span>',
+            note: '可继续保留监控，但推荐页应偏保守。',
+            rowClass: 'monitor-row-warning',
+        };
+    }
+    return {
+        chip: '<span class="monitor-chip monitor-ok">可继续使用</span>',
+        note: '当前可按既有策略继续使用。',
+        rowClass: '',
+    };
+}
+
+function fmtDelta(value, digits = 2, fallback = '—') {
+    if (value === null || value === undefined || value === '') return fallback;
+    const num = Number(value);
+    if (!Number.isFinite(num) || Number.isNaN(num)) return fallback;
+    return `${num >= 0 ? '+' : ''}${num.toFixed(digits)}pp`;
+}
+
+function buildMonitorRowKey(item) {
+    return `${item.asset_type || 'unknown'}|${item.period_days || item.horizon_label || 'na'}`;
+}
+
+function getRowPriority(item) {
+    const probabilityText = String(item.probability_status || '');
+    const gateText = String(item.gate_status || '');
+    const noteText = String(item.notes || '');
+    if (item.status === 'risk' || probabilityText.includes('D') || noteText.includes('过拟合风险高') || gateText.includes('优先重训')) return 0;
+    if (item.status === 'warning' || probabilityText.includes('C') || gateText.includes('建议降权') || noteText.includes('泛化偏高')) return 1;
+    return 2;
+}
+
+function buildSingleTrainButton(item) {
+    if (!item || !item.asset_type) return '<span class="text-muted small">—</span>';
+    const periodValue = item.period_days ?? '';
+    const label = periodValue ? '训练此模型' : '训练该资产';
+    return `<button type="button" class="btn btn-sm btn-outline-primary train-single-model-btn" data-asset-type="${escapeHtml(item.asset_type)}" data-period-days="${escapeHtml(String(periodValue))}">${label}</button>`;
+}
+
+function renderUnifiedMonitorTable() {
+    const rows = Object.values(monitorTableState || {}).sort((a, b) => {
+        const severityDiff = getRowPriority(a) - getRowPriority(b);
+        if (severityDiff !== 0) return severityDiff;
+        const assetOrder = { etf: 1, us_stock: 2, hk_stock: 3, a_stock: 4, silver: 5, gold: 6, fund: 7 };
+        const ao = assetOrder[a.asset_type] || 99;
+        const bo = assetOrder[b.asset_type] || 99;
+        if (ao !== bo) return ao - bo;
+        return Number(a.period_days || 999) - Number(b.period_days || 999);
+    });
+
+    if (!rows.length) {
+        $('#assetTrainingTableBody').html('<tr><td colspan="11" class="text-muted">暂无训练结果</td></tr>');
+        return;
+    }
+
+    const html = rows.map(item => {
+        const advice = getOptimizationAdvice(item);
+        return `<tr class="${advice.rowClass}">
+            <td>${escapeHtml(item.asset_label || '--')}</td>
+            <td>${escapeHtml(item.horizon_label || '--')}</td>
+            <td>${escapeHtml(item.version_or_model || '--')}</td>
+            <td>${escapeHtml(item.validation_result || '—')}</td>
+            <td>${escapeHtml(item.training_result || '—')}</td>
+            <td>${escapeHtml(item.gate_status || '—')}<div class="mt-1">${advice.chip}</div></td>
+            <td>${escapeHtml(item.probability_status || '—')}</td>
+            <td>${formatTimeText(item.train_date)}</td>
+            <td>${getStatusBadge(item.status)}</td>
+            <td>${escapeHtml(item.notes || '—')}<div class="small text-muted mt-1">${escapeHtml(advice.note)}</div></td>
+            <td>${buildSingleTrainButton(item)}</td>
+        </tr>`;
+    }).join('');
+    $('#assetTrainingTableBody').html(html);
+}
+
+function updateMonitorTableRows(items, options = {}) {
+    const onlyExisting = !!options.onlyExisting;
+    (Array.isArray(items) ? items : []).forEach(item => {
+        const key = buildMonitorRowKey(item);
+        if (onlyExisting && !monitorTableState[key]) return;
+        const current = monitorTableState[key] || {};
+        monitorTableState[key] = {
+            ...current,
+            asset_type: item.asset_type || current.asset_type,
+            asset_label: item.asset_label || current.asset_label || assetTypeMap[item.asset_type] || item.asset_type || '--',
+            period_days: item.period_days ?? current.period_days ?? null,
+            horizon_label: item.horizon_label || current.horizon_label || (item.period_days ? `${item.period_days}日` : '--'),
+            version_or_model: item.version_or_model || current.version_or_model || item.version || item.model_file || '--',
+            validation_result: item.validation_result || current.validation_result || '—',
+            training_result: item.training_result || current.training_result || '—',
+            gate_status: item.gate_status || current.gate_status || '—',
+            probability_status: item.probability_status || current.probability_status || '—',
+            notes: item.notes || current.notes || '—',
+            train_date: item.train_date || current.train_date || null,
+            status: item.status || current.status || 'unknown',
+        };
+    });
+    renderUnifiedMonitorTable();
+}
+
+function renderTrainingProgress(progress) {
+    const data = progress || {};
+    const status = String(data.status || 'idle');
+    const percent = Math.max(0, Math.min(100, Number(data.progress_percent || 0)));
+    const totalSteps = Number(data.total_steps || 0);
+    const completedSteps = Number(data.completed_steps || 0);
+    const currentStep = Number(data.current_step || 0);
+    const currentAsset = data.current_asset || '—';
+    const message = data.message || '等待手动重训或后台调度';
+
+    let label = '空闲';
+    let barClass = 'bg-secondary';
+    if (status === 'running' || status === 'starting') {
+        label = '训练中';
+        barClass = 'bg-info progress-bar-striped progress-bar-animated';
+    } else if (status === 'completed') {
+        label = '已完成';
+        barClass = 'bg-success';
+    } else if (status === 'failed') {
+        label = '失败';
+        barClass = 'bg-danger';
+    }
+
+    $('#trainingProgressTitle').html(`${getStatusBadge(status === 'completed' ? 'healthy' : (status === 'failed' ? 'risk' : (status === 'running' || status === 'starting' ? 'warning' : 'unknown')))} 训练状态：${label}`);
+    $('#trainingProgressMeta').text(message);
+    $('#trainingProgressPercent').text(`${percent.toFixed(1)}%`);
+    $('#trainingProgressBar')
+        .removeClass('bg-secondary bg-info bg-success bg-danger progress-bar-striped progress-bar-animated')
+        .addClass(barClass)
+        .css('width', `${percent}%`)
+        .text(`${percent.toFixed(0)}%`);
+    $('#trainingProgressDetails').text(
+        totalSteps > 0
+            ? `当前资产：${currentAsset} · 步骤 ${Math.max(currentStep, completedSteps)}/${totalSteps} · 已完成 ${completedSteps} 个资产训练`
+            : '当前暂无正在执行的模型训练任务'
+    );
+}
+
+function renderReliabilityCoverageAlerts(items, summary, reviewCoverage) {
+    const rows = Array.isArray(items) ? items : [];
+    const stat = summary || {};
+    const coverage = reviewCoverage || {};
+    const notices = [];
+
+    const coveragePct = Number(coverage.coverage_pct || stat.review_coverage_pct || 0);
+    const reviewed = Number(coverage.reviewed_predictions || stat.reviewed_predictions || 0);
+    const totalPreds = Number(coverage.total_predictions || stat.total_predictions || 0);
+    const dueTotal = Number(coverage.due_predictions || stat.due_predictions || 0);
+    const reviewedDue = Number(coverage.reviewed_due_predictions || stat.reviewed_due_predictions || 0);
+    const dueCoveragePct = Number(coverage.due_coverage_pct || stat.due_coverage_pct || 0);
+    const eligibleDue = Number(coverage.eligible_due_predictions || stat.eligible_due_predictions || 0);
+    const eligibleReviewed = Number(coverage.eligible_reviewed_predictions || stat.eligible_reviewed_predictions || 0);
+    const eligibleCoveragePct = Number(coverage.eligible_due_coverage_pct || stat.eligible_due_coverage_pct || 0);
+    const missingSource = Math.max(dueTotal - eligibleDue, 0);
+
+    if (eligibleDue > 0) {
+        const coverageClass = eligibleCoveragePct >= 95 ? 'alert-success' : (eligibleCoveragePct >= 80 ? 'alert-info' : 'alert-warning');
+        notices.push(`<div class="alert ${coverageClass} py-2 mb-2"><strong>到期可复盘覆盖</strong>：已完成 ${eligibleReviewed}/${eligibleDue} 条（${eligibleCoveragePct.toFixed(2)}%）；按全部到期口径为 ${reviewedDue}/${dueTotal} 条（${dueCoveragePct.toFixed(2)}%）。</div>`);
+    } else if (coveragePct < 5) {
+        notices.push(`<div class="alert alert-danger py-2 mb-2"><strong>实盘复盘样本仍偏少</strong>：历史累计仅 ${reviewed}/${totalPreds} 条（${coveragePct.toFixed(2)}%），高置信标签应仅作参考。</div>`);
+    }
+
+    const byPeriod = coverage.by_period || {};
+    const periodSummary = ['5', '20', '60'].map(period => {
+        const item = byPeriod[period] || {};
+        const maturityStatus = String(item.maturity_status || 'pending');
+        if (maturityStatus === 'pending') return `${period}日：待自然到期`;
+        if (Number(item.eligible_due || 0) <= 0) return `${period}日：待补行情源`;
+        return `${period}日：${Number(item.eligible_reviewed || 0)}/${Number(item.eligible_due || 0)}（${Number(item.eligible_due_coverage_pct || 0).toFixed(2)}%）`;
+    }).join(' · ');
+    notices.push(`<div class="alert alert-light border py-2 mb-2"><strong>分周期进度</strong>：${periodSummary}</div>`);
+
+    if (missingSource > 0) {
+        notices.push(`<div class="alert alert-secondary py-2 mb-2"><strong>待补数据项</strong>：当前仍有 ${missingSource} 条到期记录缺少本地行情源，已暂不计入“可复盘覆盖率”，系统会继续自动补齐。</div>`);
+    }
+
+    notices.push('<div class="alert alert-info py-2 mb-2"><strong>样本积累策略已切换</strong>：系统现已优先保留持仓与高优先级标的的完整多周期跟踪，同时将全市场补充样本聚焦到 5 日窗口，以更快累积可复盘样本。</div>');
+
+    const highRiskRows = rows.filter(item => item.overfit_risk === 'high' || item.status === 'risk').slice(0, 4);
+    const weakRows = rows.filter(item => item.status === 'warning' || item.overfit_risk === 'medium' || item.overfit_risk === 'high').slice(0, 6);
+    if (highRiskRows.length) {
+        notices.push(`<div class="alert alert-danger py-2 mb-2"><strong>优先处理</strong>：${highRiskRows.map(item => `${escapeHtml(item.asset_label || item.asset_type || '未知')} ${escapeHtml(item.horizon_label || '--')}`).join('、')} 建议先停用新增信号并安排重训。</div>`);
+    }
+    if (weakRows.length) {
+        notices.push(`<div class="alert alert-warning py-2 mb-0"><strong>当前需重点关注的模型</strong>：${weakRows.map(item => `${escapeHtml(item.asset_label || item.asset_type || '未知')} ${escapeHtml(item.horizon_label || '--')}`).join('、')}，建议降权观察。</div>`);
+    }
+
+    $('#reliabilityCoverageAlerts').html(notices.length ? notices.join('') : '<div class="small text-muted">当前未发现新的可靠性高优先级告警。</div>');
+}
+
+function renderAssetTrainingResults(items, summary) {
+    const rows = Array.isArray(items) ? items : [];
+    const stat = summary || {};
+    const totalModels = Number(stat.total_models || rows.length || 0);
+    const healthyModels = Number(stat.healthy_models || 0);
+    const overallState = totalModels <= 0
+        ? 'unknown'
+        : (healthyModels === totalModels ? 'healthy' : (healthyModels >= Math.ceil(totalModels * 0.6) ? 'warning' : 'risk'));
+    $('#monitorOverallStatus').text(overallState === 'healthy' ? '健康' : (overallState === 'warning' ? '关注' : (overallState === 'risk' ? '风险' : '--')));
+    $('#monitorPassedModels').text(totalModels > 0 ? `${healthyModels}/${totalModels}` : '--');
+
+    const reviewCoveragePct = Number(stat.review_coverage_pct || 0);
+    const dueCoveragePct = Number(stat.due_coverage_pct || 0);
+    const eligibleCoveragePct = Number(stat.eligible_due_coverage_pct || 0);
+    const dueTotal = Number(stat.due_predictions || 0);
+    const reviewedDue = Number(stat.reviewed_due_predictions || 0);
+    const eligibleDue = Number(stat.eligible_due_predictions || 0);
+    const eligibleReviewed = Number(stat.eligible_reviewed_predictions || 0);
+    const reviewStatus = String(stat.review_status || 'thin');
+    const reviewBadge = getStatusBadge(reviewStatus === 'adequate' ? 'healthy' : (reviewStatus === 'limited' ? 'warning' : 'risk'));
+    const dueLine = eligibleDue > 0
+        ? `${reviewBadge} 到期且可复盘 ${eligibleReviewed}/${eligibleDue} 条（覆盖率 ${eligibleCoveragePct.toFixed(2)}%）；按全部到期口径为 ${reviewedDue}/${dueTotal} 条（${dueCoveragePct.toFixed(2)}%）。`
+        : `${reviewBadge} 当前暂无具备真实行情源的到期样本，长周期窗口仍在自然成熟中。`;
+    $('#assetTrainingSummary').html(
+        `${getStatusBadge((stat.healthy_models || 0) === (stat.total_models || 0) ? 'healthy' : 'warning')}` +
+        ` 已接入 ${stat.asset_categories || 0} 类资产、${stat.total_models || 0} 个模型结果；当前以历史回测结果作为主判断，样本内结果仅用于排查错因和拟合偏差。` +
+        `<br>${dueLine}` +
+        `<br><span class="text-muted">历史累计已复盘 ${stat.reviewed_predictions || 0}/${stat.total_predictions || 0} 条（总覆盖率 ${reviewCoveragePct.toFixed(2)}%）。</span>`
+    );
+
+    updateMonitorTableRows(rows.map(item => {
+        const gapText = item.generalization_gap === null || item.generalization_gap === undefined
+            ? ''
+            : `高于验证${fmtDelta(item.generalization_gap, 2)}`;
+        const noteText = item.overfit_risk === 'high'
+            ? `过拟合风险高${gapText ? ' · ' + gapText : ''}`
+            : (item.overfit_risk === 'medium' ? `泛化偏高${gapText ? ' · ' + gapText : ''}` : '稳定');
+        const gateLabel = item.status === 'warning'
+            ? (item.overfit_risk === 'high' ? '优先重训' : '建议降权')
+            : '已通过';
+        return {
+            asset_type: item.asset_type,
+            asset_label: item.asset_label,
+            period_days: item.period_days,
+            horizon_label: item.horizon_label,
+            version_or_model: item.version_display || item.version || '--',
+            validation_result: fmtPct(item.metric_value, 2),
+            training_result: fmtPct(item.train_metric_value, 2),
+            notes: noteText,
+            gate_status: gateLabel,
+            train_date: item.train_date,
+            status: item.status,
+        };
+    }));
+}
+
+function renderTrendModeSwitch() {
+    $('#trendModeSwitch').html(`
+        <div class="btn-group btn-group-sm" role="group">
+            <button type="button" class="btn ${currentTrendMode === 'assets' ? 'btn-primary' : 'btn-outline-primary'} trend-mode-btn" data-mode="assets">多资产对比</button>
+            <button type="button" class="btn ${currentTrendMode === 'history' ? 'btn-primary' : 'btn-outline-primary'} trend-mode-btn" data-mode="history">训练趋势</button>
+        </div>
+    `);
+}
+
+function renderTrendQuickFilters(assetRows) {
+    if (currentTrendMode !== 'assets') {
+        $('#trendQuickFilters').html('<div class="small text-muted">训练趋势当前重点展示连续版本轨迹；其他资产请看“多资产对比”。</div>');
+        return;
+    }
+
+    const available = new Set((Array.isArray(assetRows) ? assetRows : []).map(item => item.asset_type).filter(Boolean));
+    const order = ['a_stock', 'fund', 'gold', 'silver', 'etf', 'hk_stock', 'us_stock'];
+    const buttons = [{ key: 'all', label: '全部资产' }];
+    order.forEach(type => {
+        if (available.has(type)) buttons.push({ key: type, label: assetTypeMap[type] || type });
+    });
+    if (currentTrendFilter !== 'all' && !available.has(currentTrendFilter)) currentTrendFilter = 'all';
+
+    $('#trendQuickFilters').html(buttons.map(btn => `
+        <button type="button" class="btn btn-sm ${currentTrendFilter === btn.key ? 'btn-primary' : 'btn-outline-secondary'} trend-filter-btn me-2 mb-1" data-filter="${btn.key}">${btn.label}</button>
+    `).join(''));
+}
+
+function renderHistoricalTrend(rawTrend) {
+    const horizonOrder = [5, 20, 60];
+    const horizonLabels = { 5: '5日', 20: '20日', 60: '60日' };
+    const horizonColors = { 5: '#00d4ff', 20: '#6bcb77', 60: '#ffb020' };
+    const groupedTrend = {};
+    horizonOrder.forEach(h => { groupedTrend[h] = []; });
+    (Array.isArray(rawTrend) ? rawTrend : []).forEach(item => {
+        const h = Number(item.period_days || 0);
+        if (groupedTrend[h]) groupedTrend[h].push(item);
+    });
+    horizonOrder.forEach(h => {
+        groupedTrend[h] = groupedTrend[h]
+            .sort((a, b) => new Date(a.train_date || 0) - new Date(b.train_date || 0))
+            .slice(-50);
+    });
+
+    const maxLen = Math.max(...horizonOrder.map(h => groupedTrend[h].length), 0);
+    if (accuracyTrendChart) accuracyTrendChart.dispose();
+    accuracyTrendChart = echarts.init(document.getElementById('accuracyTrendChart'));
+
+    if (!maxLen) {
+        $('#accuracyTrendHighlights').html('<span class="text-muted">暂无可展示的历史训练轨迹</span>');
+        $('#accuracyTrendDateRange').text('最近50次训练结果暂无趋势数据');
+        accuracyTrendChart.setOption({ title: { text: '暂无趋势数据', left: 'center', top: 'center' } });
+        return;
+    }
+
+    const xAxisData = Array.from({ length: maxLen }, (_, idx) => {
+        for (const h of horizonOrder) {
+            const item = groupedTrend[h][idx];
+            if (item && item.day_label) return item.day_label;
+        }
+        return String(idx + 1);
+    });
+    const allDates = horizonOrder.flatMap(h => groupedTrend[h].map(i => i.train_date)).filter(Boolean);
+    const startDate = allDates[0];
+    const endDate = allDates[allDates.length - 1];
+    $('#accuracyTrendHighlights').html(horizonOrder.map(h => {
+        const last = groupedTrend[h][groupedTrend[h].length - 1];
+        return last ? `<span class="monitor-chip monitor-ok">${horizonLabels[h]} 最新 ${fmtPct(last.accuracy, 2)}</span>` : '';
+    }).join(''));
+    $('#accuracyTrendDateRange').text(`A股最近50次训练结果：${formatDateOnly(startDate)} ~ ${formatDateOnly(endDate)}`);
+
+    accuracyTrendChart.setOption({
+        backgroundColor: 'transparent',
+        tooltip: {
+            trigger: 'axis',
+            backgroundColor: 'rgba(14, 24, 38, 0.92)',
+            borderWidth: 0,
+            textStyle: { color: '#fff' },
+            formatter: function(params) {
+                const lines = [];
+                (params || []).forEach(p => {
+                    const row = p && p.data ? p.data : {};
+                    if (row.value === null || row.value === undefined) return;
+                    lines.push(`${p.marker}${p.seriesName}：${fmtPct(row.value, 2)}`);
+                });
+                const dateText = params?.[0]?.data?.train_date ? formatDateOnly(params[0].data.train_date) : '';
+                return [`<strong>${dateText}</strong>`, ...lines].join('<br/>') || '暂无数据';
+            }
+        },
+        legend: {
+            data: horizonOrder.map(h => horizonLabels[h]),
+            top: 8,
+            right: 10,
+            itemWidth: 18,
+            textStyle: { fontSize: 12, color: '#4a5568' }
+        },
+        grid: { left: 55, right: 24, top: 55, bottom: 50 },
+        xAxis: {
+            type: 'category',
+            data: xAxisData,
+            axisLabel: { fontSize: 11, color: '#6b7280' },
+            axisLine: { lineStyle: { color: '#d7dee7' } },
+            axisTick: { show: false },
+            name: '日期',
+            nameTextStyle: { color: '#6b7280', padding: [10, 0, 0, 0] }
+        },
+        yAxis: {
+            type: 'value',
+            name: '准确率 (%)',
+            min: 0,
+            max: 100,
+            splitLine: { lineStyle: { color: '#edf2f7', type: 'dashed' } },
+            axisLabel: { color: '#6b7280' },
+            nameTextStyle: { color: '#6b7280' }
+        },
+        series: horizonOrder.map(h => ({
+            name: horizonLabels[h],
+            type: 'line',
+            smooth: true,
+            connectNulls: true,
+            symbol: 'circle',
+            symbolSize: 7,
+            showSymbol: false,
+            emphasis: { focus: 'series', scale: true },
+            data: Array.from({ length: maxLen }, (_, idx) => {
+                const item = groupedTrend[h][idx];
+                return item ? { value: Number(item.accuracy || 0), train_date: item.train_date, version: item.version } : { value: null };
+            }),
+            lineStyle: { color: horizonColors[h], width: 3 },
+            itemStyle: { color: horizonColors[h] },
+            areaStyle: { color: horizonColors[h], opacity: 0.06 }
+        }))
+    });
+}
+
+function renderAssetComparisonTrend(assetRows) {
+    const rows = (Array.isArray(assetRows) ? assetRows : []).filter(item => item.metric_value !== null && item.metric_value !== undefined);
+    const filtered = currentTrendFilter === 'all' ? rows : rows.filter(item => item.asset_type === currentTrendFilter);
+
+    if (accuracyTrendChart) accuracyTrendChart.dispose();
+    accuracyTrendChart = echarts.init(document.getElementById('accuracyTrendChart'));
+
+    if (!filtered.length) {
+        $('#accuracyTrendHighlights').html('<span class="text-muted">当前筛选条件下暂无资产效果数据</span>');
+        $('#accuracyTrendDateRange').text('暂无多资产效果对比数据');
+        accuracyTrendChart.setOption({ title: { text: '暂无对比数据', left: 'center', top: 'center' } });
+        return;
+    }
+
+    const assetOrder = { a_stock: 1, fund: 2, gold: 3, silver: 4, etf: 5, hk_stock: 6, us_stock: 7 };
+    const horizonOrder = { '5日': 1, '10日': 2, '20日': 3, '60日': 4, '回归': 5 };
+    const assetTypes = [...new Set(filtered.sort((a, b) => (assetOrder[a.asset_type] || 99) - (assetOrder[b.asset_type] || 99)).map(item => item.asset_type))];
+    const assetLabels = assetTypes.map(type => assetTypeMap[type] || type);
+    const horizons = [...new Set(filtered.map(item => item.horizon_label || '--'))].sort((a, b) => (horizonOrder[a] || 99) - (horizonOrder[b] || 99));
+    const colors = { '5日': '#00d4ff', '10日': '#5b8ff9', '20日': '#6bcb77', '60日': '#ffb020', '回归': '#9b6bff' };
+
+    const ranking = filtered.slice().sort((a, b) => Number(b.metric_value || 0) - Number(a.metric_value || 0)).slice(0, 5);
+    $('#accuracyTrendHighlights').html(ranking.map(item => `
+        <span class="monitor-chip monitor-ok">${item.asset_label} ${item.horizon_label} · ${fmtPct(item.metric_value, 2)}</span>
+    `).join(''));
+    $('#accuracyTrendDateRange').text(currentTrendFilter === 'all'
+        ? `当前激活模型已覆盖 ${assetTypes.length} 类资产，可按资产快速切换查看`
+        : `${assetTypeMap[currentTrendFilter] || currentTrendFilter} 当前激活模型效果对比`);
+
+    accuracyTrendChart.setOption({
+        backgroundColor: 'transparent',
+        tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow' },
+            formatter: function(params) {
+                const lines = (params || []).filter(p => p.value !== null && p.value !== undefined && p.value !== '-').map(p => `${p.marker}${p.seriesName}：${fmtPct(p.value, 2)}`);
+                return [`<strong>${params?.[0]?.axisValue || ''}</strong>`, ...lines].join('<br/>');
+            }
+        },
+        legend: {
+            data: horizons,
+            top: 8,
+            right: 10,
+            itemWidth: 18,
+            textStyle: { fontSize: 12, color: '#4a5568' }
+        },
+        grid: { left: 55, right: 24, top: 55, bottom: 50 },
+        xAxis: {
+            type: 'category',
+            data: assetLabels,
+            axisLabel: { fontSize: 11, color: '#6b7280', interval: 0 },
+            axisLine: { lineStyle: { color: '#d7dee7' } },
+            axisTick: { show: false }
+        },
+        yAxis: {
+            type: 'value',
+            name: '历史回测 (%)',
+            min: 0,
+            max: 100,
+            splitLine: { lineStyle: { color: '#edf2f7', type: 'dashed' } },
+            axisLabel: { color: '#6b7280' },
+            nameTextStyle: { color: '#6b7280' }
+        },
+        series: horizons.map(horizon => ({
+            name: horizon,
+            type: 'bar',
+            barMaxWidth: 24,
+            itemStyle: { color: colors[horizon] || '#5b8ff9', borderRadius: [4, 4, 0, 0] },
+            data: assetTypes.map(type => {
+                const matched = filtered.find(item => item.asset_type === type && (item.horizon_label || '--') === horizon);
+                return matched ? Number(matched.metric_value || 0) : null;
+            })
+        }))
+    });
+}
+
+function renderTrendVisualization(rawTrend, assetRows) {
+    trendPayloadState = {
+        rawTrend: Array.isArray(rawTrend) ? rawTrend : [],
+        assetRows: Array.isArray(assetRows) ? assetRows : []
+    };
+    renderTrendModeSwitch();
+    renderTrendQuickFilters(trendPayloadState.assetRows);
+    if (currentTrendMode === 'history') {
+        renderHistoricalTrend(trendPayloadState.rawTrend);
+    } else {
+        renderAssetComparisonTrend(trendPayloadState.assetRows);
+    }
+}
+
+$(document).on('click', '.trend-mode-btn', function() {
+    currentTrendMode = $(this).data('mode') || 'assets';
+    if (currentTrendMode !== 'assets') currentTrendFilter = 'all';
+    renderTrendVisualization(trendPayloadState.rawTrend, trendPayloadState.assetRows);
+});
+
+$(document).on('click', '.trend-filter-btn', function() {
+    currentTrendFilter = $(this).data('filter') || 'all';
+    renderTrendVisualization(trendPayloadState.rawTrend, trendPayloadState.assetRows);
+});
+
+function loadCoreModelStatus() {
+    $.ajax({
+        url: '/api/model/status',
+        method: 'GET',
+        success: function(r) {
+            if (!(r.code === 200 && r.data)) return;
+            const versionSource = r.data.current_version_source || 'none';
+            const currentPeriodVersions = r.data.current_period_versions || {};
+            const currentVersionText = r.data.current_version
+                ? `${r.data.current_version}${versionSource === 'latest_fallback' ? '（自动回退）' : ''}`
+                : '--';
+            if (Object.keys(currentPeriodVersions).length) {
+                const pills = Object.entries(currentPeriodVersions)
+                    .sort((a, b) => Number(a[0]) - Number(b[0]))
+                    .map(([period, version]) => `<span class="monitor-current-pill">${period}日 · ${escapeHtml(version || '--')}</span>`)
+                    .join('');
+                $('#monitorCurrentVersion').html(pills);
+            } else {
+                $('#monitorCurrentVersion').html(`<span class="monitor-current-pill">${escapeHtml(currentVersionText)}</span>`);
+            }
+            $('#monitorUpdatedAt').text(`更新时间：${formatTimeText(r.data.last_train_date)}`);
+            $('#versionStatusHint').text(
+                versionSource === 'period_summary'
+                    ? '当前使用版本已按 5 / 20 / 60 日分别展示，优先观察历史回测表现。'
+                    : (versionSource === 'latest_fallback'
+                        ? '数据库暂无显式激活版本，系统已自动回退到最新可用版本；后续训练仍会继续。'
+                        : '可查看最近版本记录，并按历史回测准确率对比模型效果。')
+            );
+
+            const assetTrainingResults = Array.isArray(r.data.asset_training_results) ? r.data.asset_training_results : [];
+            renderTrainingProgress(r.data.training_progress || {});
+            renderAssetTrainingResults(assetTrainingResults, r.data.asset_training_summary || {});
+            renderReliabilityCoverageAlerts(assetTrainingResults, r.data.asset_training_summary || {}, r.data.review_coverage || {});
+
+            const recentVersions = Array.isArray(r.data.recent_versions) ? r.data.recent_versions : [];
+            const comparisons = Array.isArray(r.data.period_comparison) ? r.data.period_comparison : [];
+            if (!comparisons.length) {
+                $('#periodComparisonBox').html('<div class="small text-muted">暂无可对比的版本效果数据。</div>');
+            } else {
+                $('#periodComparisonBox').html(comparisons.map(item => {
+                    const badgeClass = item.status === 'improved' ? 'monitor-ok' : (item.status === 'weakened' ? 'monitor-warn' : 'monitor-neutral');
+                    const deltaAcc = fmtDelta(item.delta_accuracy);
+                    const deltaF1 = fmtDelta(item.delta_f1);
+                    return `<span class="monitor-chip ${badgeClass}">${item.period_days}日：Acc ${fmtPct(item.current_accuracy, 2)}，F1 ${fmtPct(item.current_f1, 2)}，ΔAcc ${deltaAcc}，ΔF1 ${deltaF1}</span>`;
+                }).join(''));
+            }
+
+            if (!recentVersions.length) {
+                $('#versionStatusHint').text('暂无版本历史。');
+            }
+
+            const rawTrend = Array.isArray(r.data.accuracy_trend) ? r.data.accuracy_trend : [];
+            renderTrendVisualization(rawTrend, assetTrainingResults);
+
+            const features = Array.isArray(r.data.feature_importance) ? r.data.feature_importance.slice(0, 10) : [];
+            if (featureImportanceChart) featureImportanceChart.dispose();
+            featureImportanceChart = echarts.init(document.getElementById('featureImportanceChart'));
+            if (!features.length) {
+                featureImportanceChart.setOption({ title: { text: '暂无特征重要性数据', left: 'center', top: 'center' } });
+            } else {
+                featureImportanceChart.setOption({
+                    tooltip: { trigger: 'axis' },
+                    xAxis: { type: 'value', name: '重要性' },
+                    yAxis: { type: 'category', data: features.map(f => featureNameMap[f.feature] || f.feature).reverse(), axisLabel: { fontSize: 11 } },
+                    series: [{ type: 'bar', data: features.map(f => Number(f.importance || 0)).reverse(), itemStyle: { color: '#6bcb77', borderRadius: [0, 4, 4, 0] } }]
+                });
+            }
+        }
+    });
+}
+
+function loadModelEvaluation() {
+    $.ajax({
+        url: '/api/reviews/model-evaluation',
+        method: 'GET',
+        success: function(r) {
+            if (!(r.code === 200 && r.data)) return;
+            const data = r.data;
+            const models = Array.isArray(data.models) ? data.models : [];
+            $('#modelGateSummary').html(`${getStatusBadge(data.overall_status)} A股主模型共 ${data.total_models || 0} 个周期，已通过 ${data.passed_count || 0} 个；页面顶部总览口径已按全资产统计。`);
+
+            if (!models.length) {
+                $('#modelGateChips').html('<span class="text-muted">暂无模型评估记录</span>');
+                return;
+            }
+
+            $('#modelGateChips').html(models.map(item => {
+                const gate = item.quality_gate || {};
+                const gateText = gate.passed ? '已通过' : (gate.gate_reason || '未通过');
+                return `<span class="monitor-chip ${gate.passed ? 'monitor-ok' : 'monitor-warn'}">${item.period_days || '--'}日 · ${escapeHtml(gateText)}</span>`;
+            }).join(''));
+
+            updateMonitorTableRows(models.map(item => {
+                const gate = item.quality_gate || {};
+                return {
+                    asset_type: 'a_stock',
+                    asset_label: 'A股',
+                    period_days: item.period_days,
+                    horizon_label: `${item.period_days || '--'}日`,
+                    version_or_model: item.version || '--',
+                    gate_status: gate.passed ? '已通过' : '未通过',
+                    notes: gate.passed ? '—' : (gate.gate_reason || '需继续优化'),
+                    status: item.status === 'ok' ? 'healthy' : 'warning',
+                };
+            }), { onlyExisting: true });
+        },
+        error: function() {
+            $('#modelGateChips').html('<span class="text-danger">模型评估加载失败</span>');
+        }
+    });
+}
+
+function loadProbabilityHealth() {
+    $.ajax({
+        url: '/api/recommendations/probability-health',
+        method: 'GET',
+        success: function(r) {
+            if (!(r.code === 200)) return;
+            const summary = r.summary || {};
+            $('#monitorAvgBrier').text(summary.avg_brier !== null && summary.avg_brier !== undefined ? fmtNum(summary.avg_brier, 4) : '--');
+            $('#probabilityHealthSummary').html(
+                `${getStatusBadge(summary.overall_grade === 'A' ? 'healthy' : (summary.overall_grade === 'B' ? 'warning' : 'risk'))}` +
+                ` 概率健康总评级 ${summary.overall_grade || 'N/A'}，有效监控项 ${summary.valid_metrics_count || 0} 个，平均绝对校准偏差 ${fmtNum(summary.avg_abs_calibration_gap, 2)}。当前已覆盖 5 / 20 / 60 日三档监控。`
+            );
+
+            const warnings = Array.isArray(r.warnings) ? r.warnings : [];
+            if (!warnings.length) {
+                $('#probabilityHealthAlerts').html('<div class="small text-muted">当前没有显著的概率健康预警。</div>');
+            } else {
+                $('#probabilityHealthAlerts').html(warnings.map(item => {
+                    const actionText = item.grade === 'D' ? '建议暂停新增信号，优先重训。' : '建议降权观察，继续累积样本。';
+                    const alertClass = item.grade === 'D' ? 'alert-danger' : 'alert-warning';
+                    return `
+                    <div class="alert ${alertClass} py-2 mb-2">
+                        <strong>${assetTypeMap[item.type] || item.type} ${item.horizon}日</strong>
+                        · 评级 ${item.grade} · 样本 ${item.samples || 0} · 校准偏差 ${fmtNum(item.calibration_gap, 2)}
+                        <div class="small mt-1">${actionText}</div>
+                    </div>
+                `;
+                }).join(''));
+            }
+
+            const data = r.data || {};
+            const healthUpdates = [];
+            Object.keys(data).sort().forEach(type => {
+                const horizons = data[type] || {};
+                Object.keys(horizons).sort((a, b) => Number(a) - Number(b)).forEach(horizon => {
+                    const item = horizons[horizon] || {};
+                    healthUpdates.push({
+                        asset_type: type,
+                        asset_label: assetTypeMap[type] || type,
+                        period_days: Number(horizon),
+                        horizon_label: `${horizon}日`,
+                        probability_status: `${item.grade || 'N/A'} · Brier ${fmtNum(item.brier, 4)}`,
+                        status: item.grade === 'A' ? 'healthy' : (item.grade === 'B' ? 'warning' : 'risk'),
+                    });
+                });
+            });
+            updateMonitorTableRows(healthUpdates, { onlyExisting: true });
+        },
+        error: function() {
+            $('#probabilityHealthAlerts').html('<div class="small text-danger">概率健康数据加载失败</div>');
+        }
+    });
+}
+
+function loadLearningLoop() {
+    $.ajax({
+        url: '/api/reviews/learning-status',
+        method: 'GET',
+        success: function(r) {
+            if (!(r.code === 200 && r.data)) return;
+            const data = r.data;
+            const review = data.last_review || {};
+            const reflection = data.last_reflection || {};
+            const retrain = data.last_retrain || {};
+            const insights = Array.isArray(data.latest_insights) ? data.latest_insights : [];
+            $('#learningLoopBox').html(`
+                <div class="monitor-box mb-2">
+                    <div class="fw-semibold mb-1">最近复盘</div>
+                    <div class="small text-muted">${escapeHtml(review.message || '暂无')}</div>
+                    <div class="small text-muted">${formatTimeText(review.time)}</div>
+                </div>
+                <div class="monitor-box mb-2">
+                    <div class="fw-semibold mb-1">最近反思</div>
+                    <div class="small text-muted">调整建议 ${reflection.adjustments_count || 0} 条</div>
+                    <div class="small text-muted">重训目标 ${(reflection.retrain_targets || []).length || 0} 个</div>
+                </div>
+                <div class="monitor-box">
+                    <div class="fw-semibold mb-1">最近重训</div>
+                    <div class="small text-muted">状态：${escapeHtml(retrain.status || 'idle')}</div>
+                    <div class="small text-muted">洞察：${escapeHtml(insights[0]?.suggestion || '暂无')}</div>
+                </div>
+            `);
+        }
+    });
+}
+
+function loadOptimizationLoops() {
+    $.ajax({
+        url: '/api/reviews/optimization-loops',
+        method: 'GET',
+        success: function(r) {
+            if (!(r.code === 200 && r.data)) return;
+            const shortLoop = r.data.short_term || {};
+            const mediumLoop = r.data.medium_term || {};
+            function renderLoop(name, loop) {
+                const status = loop.status || 'not_started';
+                const note = status === 'max_rounds_reached'
+                    ? '已达到本轮优化上限，今天先暂停自动试验；后续有新数据或手动重训仍可继续。'
+                    : (status === 'target_met' ? '当前指标已达目标，系统会继续监控但不必频繁重训。' : '系统会按数据更新情况继续推进闭环。');
+                return `<div class="monitor-box mb-2">
+                    <div class="fw-semibold mb-1">${name}</div>
+                    <div class="small text-muted">状态：${escapeHtml(status)}</div>
+                    <div class="small text-muted">完成轮次：${loop.rounds_completed || 0}/${loop.max_rounds || 0}</div>
+                    <div class="small text-muted">最佳 Accuracy：${fmtPct((Number(loop.best_accuracy || 0) * 100), 1, '--')}</div>
+                    <div class="small text-muted">最佳 F1：${fmtPct((Number(loop.best_f1 || 0) * 100), 1, '--')}</div>
+                    <div class="small text-muted mt-1">说明：${note}</div>
+                </div>`;
+            }
+            $('#optimizationLoopBox').html(renderLoop('5日模型', shortLoop) + renderLoop('20日模型', mediumLoop));
+        }
+    });
+}
+
+$(document).on('click', '.train-single-model-btn', function() {
+    const $btn = $(this);
+    const assetType = $btn.data('asset-type');
+    const periodDays = $btn.data('period-days');
+    const confirmText = periodDays ? `确定重训 ${assetType} 的 ${periodDays}日模型吗？` : `确定重训 ${assetType} 资产模型吗？`;
+    if (!confirm(confirmText)) return;
+
+    $btn.prop('disabled', true).text('启动中...');
+    $.ajax({
+        url: '/api/model/train',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ asset_type: assetType, period_days: periodDays || null }),
+        success: function(r) {
+            if (r.code === 200) {
+                showToast(r.message || '单模型训练已启动', 'success');
+                loadCoreModelStatus();
+                setTimeout(() => { loadCoreModelStatus(); loadModelEvaluation(); }, 5000);
+            } else {
+                showToast('启动失败: ' + (r.message || '未知错误'), 'error');
+            }
+        },
+        error: function(xhr) {
+            showToast('启动失败: ' + (xhr.responseJSON?.message || '网络错误'), 'error');
+        },
+        complete: function() {
+            $btn.prop('disabled', false).text(periodDays ? '训练此模型' : '训练该资产');
+        }
+    });
+});
+
+$('#retrainBtn').on('click', function() {
+    if (!confirm('确定重新训练模型吗？可能需要几分钟。')) return;
+    const $btn = $(this);
+    $btn.html('<i class="fas fa-spinner fa-spin"></i> 训练中...').prop('disabled', true);
+    $.ajax({
+        url: '/api/model/train',
+        method: 'POST',
+        success: function(r) {
+            if (r.code === 200) {
+                showToast('模型训练已启动', 'success');
+                loadCoreModelStatus();
+                setTimeout(() => { loadCoreModelStatus(); loadModelEvaluation(); }, 5000);
+            } else {
+                showToast('训练失败: ' + (r.message || '未知错误'), 'error');
+            }
+        },
+        error: function() { showToast('网络错误', 'error'); },
+        complete: function() { $btn.html('<i class="fas fa-sync-alt"></i> 重新训练').prop('disabled', false); }
+    });
+});
+
+$('#exportModelBtn').on('click', function() { window.location.href = '/api/model/export'; });
+$('#importModelBtn').on('click', function() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.pkl,.joblib';
+    input.onchange = function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        const formData = new FormData();
+        formData.append('model_file', file);
+        const $btn = $('#importModelBtn');
+        $btn.html('<i class="fas fa-spinner fa-spin"></i> 导入中...').prop('disabled', true);
+        $.ajax({
+            url: '/api/model/import',
+            method: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            success: function(r) {
+                if (r.code === 200) {
+                    showToast('导入成功', 'success');
+                    loadCoreModelStatus();
+                    loadModelEvaluation();
+                } else {
+                    showToast('导入失败: ' + (r.message || '未知错误'), 'error');
+                }
+            },
+            error: function() { showToast('导入失败', 'error'); },
+            complete: function() { $btn.html('<i class="fas fa-upload"></i> 导入模型').prop('disabled', false); }
+        });
+    };
+    input.click();
+});
+
+$(document).ready(function() {
+    loadCoreModelStatus();
+    loadModelEvaluation();
+    loadProbabilityHealth();
+    loadLearningLoop();
+    loadOptimizationLoops();
+    setInterval(function() {
+        if (document.hasFocus()) {
+            loadCoreModelStatus();
+            loadModelEvaluation();
+            loadProbabilityHealth();
+        }
+    }, 30000);
+    $(window).resize(function() {
+        if (accuracyTrendChart) accuracyTrendChart.resize();
+        if (featureImportanceChart) featureImportanceChart.resize();
+    });
+});
+</script>
+{% endblock %}

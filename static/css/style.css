@@ -1,0 +1,278 @@
+/* 自定义样式 - style.css */
+/* 个人AI理财助手 */
+
+:root {
+    --primary-color: #00d4ff;
+    --primary-dark: #0099cc;
+    --secondary-color: #6bcb77;
+    --danger-color: #ff6b6b;
+    --warning-color: #ffd93d;
+    --dark-color: #1a1a2e;
+    --light-color: #f5f7fa;
+    --text-color: #333;
+    --text-muted: #666;
+    --border-color: #e0e0e0;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background-color: var(--light-color);
+    color: var(--text-color);
+}
+
+/* 动画 */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.fade-in {
+    animation: fadeIn 0.3s ease-out;
+}
+
+/* 卡片样式 */
+.card {
+    border: none;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s, box-shadow 0.2s;
+    background: white;
+}
+
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+}
+
+.card-header {
+    background: white;
+    border-bottom: 1px solid var(--border-color);
+    padding: 15px 20px;
+    font-weight: 600;
+    border-radius: 12px 12px 0 0;
+}
+
+.card-body {
+    padding: 20px;
+}
+
+/* 统计卡片 */
+.stat-card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s;
+    height: 100%;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+}
+
+.stat-card .stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--dark-color);
+}
+
+.stat-card .stat-label {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin-top: 5px;
+}
+
+.stat-card .stat-trend {
+    font-size: 0.75rem;
+    margin-top: 5px;
+}
+
+.stat-card .trend-up {
+    color: var(--secondary-color);
+}
+
+.stat-card .trend-down {
+    color: var(--danger-color);
+}
+
+/* 表格样式 */
+.table-custom {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.table-custom th,
+.table-custom td {
+    padding: 12px 15px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.table-custom th {
+    background: #f8f9fa;
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.table-custom tr:hover {
+    background: #f8f9fa;
+}
+
+/* 按钮样式 */
+.btn-custom {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
+    border: none;
+    color: white;
+    padding: 8px 20px;
+    border-radius: 8px;
+    transition: all 0.3s;
+}
+
+.btn-custom:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 212, 255, 0.3);
+    color: white;
+}
+
+.btn-custom:disabled {
+    opacity: 0.6;
+    transform: none;
+    cursor: not-allowed;
+}
+
+/* 标签样式 */
+.badge-high {
+    background: var(--danger-color);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    display: inline-block;
+}
+
+.badge-medium {
+    background: var(--warning-color);
+    color: var(--dark-color);
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    display: inline-block;
+}
+
+.badge-low {
+    background: var(--secondary-color);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    display: inline-block;
+}
+
+/* 加载动画 */
+.loading {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border: 2px solid var(--border-color);
+    border-top: 2px solid var(--primary-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+/* 进度条 */
+.progress-custom {
+    height: 6px;
+    background-color: var(--border-color);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.progress-custom .progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+
+/* 工具类 */
+.text-primary-custom {
+    color: var(--primary-color);
+}
+
+.bg-primary-custom {
+    background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-dark) 100%);
+}
+
+.cursor-pointer {
+    cursor: pointer;
+}
+
+.text-success {
+    color: var(--secondary-color) !important;
+}
+
+.text-danger {
+    color: var(--danger-color) !important;
+}
+
+.text-warning {
+    color: var(--warning-color) !important;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+    .stat-card .stat-value {
+        font-size: 1.5rem;
+    }
+    
+    .table-custom th,
+    .table-custom td {
+        padding: 8px 10px;
+        font-size: 0.85rem;
+    }
+    
+    .card-header {
+        padding: 12px 15px;
+    }
+    
+    .card-body {
+        padding: 15px;
+    }
+}
+
+/* 打印样式 */
+@media print {
+    .sidebar,
+    .top-bar,
+    .btn-custom,
+    .btn-outline-secondary {
+        display: none;
+    }
+    
+    .main-content {
+        margin-left: 0;
+        padding: 0;
+    }
+    
+    .card {
+        box-shadow: none;
+        border: 1px solid var(--border-color);
+    }
+}

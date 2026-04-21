@@ -1,0 +1,520 @@
+{% extends "base.html" %}
+
+{% block title %}数据管理 - 个人AI理财助手{% endblock %}
+{% block page_title %}数据管理{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="fas fa-database"></i> 自动补采任务</span>
+            <div class="d-flex gap-2 align-items-center">
+                <span class="badge bg-secondary" id="backfillStatusBadge">未运行</span>
+                <button class="btn btn-sm btn-primary" id="startBackfillBtn">
+                    <i class="fas fa-play"></i> 启动补缺补采
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row g-3 mb-3">
+                <div class="col-md-3">
+                    <div class="border rounded p-3 bg-light">
+                        <small class="text-muted d-block">总交易日</small>
+                        <h5 class="mb-0" id="totalDays">0</h5>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="border rounded p-3 bg-light">
+                        <small class="text-muted d-block">已完成交易日</small>
+                        <h5 class="mb-0" id="completedDays">0</h5>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="border rounded p-3 bg-light">
+                        <small class="text-muted d-block">成功交易日</small>
+                        <h5 class="mb-0 text-success" id="successDays">0</h5>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="border rounded p-3 bg-light">
+                        <small class="text-muted d-block">失败交易日</small>
+                        <h5 class="mb-0 text-danger" id="failedDays">0</h5>
+                    </div>
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-between mb-2">
+                <small class="text-muted" id="backfillMessage">暂无补采任务</small>
+                <small class="text-muted" id="backfillPercent">0%</small>
+            </div>
+            <div class="progress" style="height: 12px;">
+                <div
+                    id="backfillProgressBar"
+                    class="progress-bar"
+                    role="progressbar"
+                    style="width: 0%;"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow="0"
+                ></div>
+            </div>
+
+            <div class="small text-muted mt-3 mb-2">默认只补采缺失或为空的数据；如需整库重扫，再切换为全量模式。</div>
+            <div class="mt-3 d-flex gap-3 flex-wrap">
+                <small class="text-muted">当前步骤: <span id="backfillCurrentStep">-</span></small>
+                <small class="text-muted">当前步骤耗时: <span id="backfillCurrentElapsed">-</span></small>
+                <small class="text-muted">任务已运行: <span id="backfillTotalElapsed">-</span></small>
+                <small class="text-muted">日均耗时: <span id="backfillAvgDayElapsed">-</span></small>
+                <small class="text-muted">任务完成: <span id="backfillCompleted">0/0</span></small>
+                <small class="text-muted">任务成功: <span id="backfillSuccess">0</span></small>
+                <small class="text-muted">任务失败: <span id="backfillFailed">0</span></small>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="fas fa-table-list"></i> 数据资产盘点</span>
+            <small class="text-muted">类型 / 数据量 / 最近更新时间 / 单项采集</small>
+        </div>
+        <div class="card-body" id="datasetInventoryBox">
+            <small class="text-muted">加载中...</small>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <i class="fas fa-list-check"></i> 当前采集清单（关键与最近步骤）
+        </div>
+        <div class="card-body" id="backfillSteps">
+            <small class="text-muted">暂无步骤信息</small>
+        </div>
+    </div>
+
+    <div class="row g-4 mb-4">
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <i class="fas fa-clock-rotate-left"></i> 最近步骤（含耗时）
+                </div>
+                <div class="card-body" id="backfillRecentSteps">
+                    <small class="text-muted">暂无最近步骤</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <i class="fas fa-stopwatch"></i> 最慢步骤 TOP 5
+                </div>
+                <div class="card-body" id="backfillSlowSteps">
+                    <small class="text-muted">暂无耗时统计</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4 mb-4">
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <i class="fas fa-wave-square"></i> 流水线阶段（当前/最近）
+                </div>
+                <div class="card-body">
+                    <div class="mb-3" id="pipelineCurrentStage">
+                        <small class="text-muted">当前阶段: -</small>
+                    </div>
+                    <div id="pipelineRecentStages">
+                        <small class="text-muted">暂无阶段记录</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <i class="fas fa-gauge-high"></i> 流水线最慢阶段 TOP 5
+                </div>
+                <div class="card-body" id="pipelineSlowStages">
+                    <small class="text-muted">暂无阶段耗时统计</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="fas fa-triangle-exclamation"></i> 失败项重试</span>
+            <small class="text-muted">可单独触发某一项补采</small>
+        </div>
+        <div class="card-body" id="failedStepList">
+            <small class="text-muted">暂无失败项</small>
+        </div>
+    </div>
+</div>
+
+<script>
+function formatDuration(seconds) {
+    if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return '-';
+    const s = Math.max(0, Math.round(Number(seconds)));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}h ${m}m ${sec}s`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+}
+
+function buildBackfillStepWindow(steps) {
+    if (!Array.isArray(steps) || steps.length <= 50) return steps || [];
+    const runningIndex = steps.findIndex(s => s.status === 'running');
+    const pivot = runningIndex >= 0 ? runningIndex : steps.length - 1;
+    const start = Math.max(0, pivot - 10);
+    const end = Math.min(steps.length, pivot + 25);
+    return steps.slice(start, end);
+}
+
+function renderRecentSteps(recentSteps) {
+    if (!Array.isArray(recentSteps) || recentSteps.length === 0) {
+        $('#backfillRecentSteps').html('<small class="text-muted">暂无最近步骤</small>');
+        return;
+    }
+
+    const html = recentSteps.slice().reverse().map(item => {
+        const badgeClass = item.status === 'success' ? 'success' : (item.status === 'failed' ? 'danger' : 'primary');
+        return `<div class="d-flex justify-content-between align-items-start border rounded px-2 py-1 mb-1">
+            <div>
+                <div class="fw-semibold">${escapeHtml(item.name || '')}</div>
+                <small class="text-muted">${escapeHtml(item.message || '')}</small>
+            </div>
+            <div class="text-end">
+                <span class="badge bg-${badgeClass}">${escapeHtml(item.status || '-')}</span>
+                <div><small class="text-muted">${formatDuration(item.duration_seconds)}</small></div>
+            </div>
+        </div>`;
+    }).join('');
+
+    $('#backfillRecentSteps').html(html);
+}
+
+function renderSlowSteps(slowestSteps) {
+    if (!Array.isArray(slowestSteps) || slowestSteps.length === 0) {
+        $('#backfillSlowSteps').html('<small class="text-muted">暂无耗时统计</small>');
+        return;
+    }
+
+    const rows = slowestSteps.map((item, idx) => {
+        return `<tr>
+            <td>${idx + 1}</td>
+            <td>${escapeHtml(item.name || '-')}</td>
+            <td>${escapeHtml(item.status || '-')}</td>
+            <td>${formatDuration(item.duration_seconds)}</td>
+        </tr>`;
+    }).join('');
+
+    const table = `<div class="table-responsive"><table class="table table-sm mb-0">
+        <thead><tr><th>#</th><th>步骤</th><th>状态</th><th>耗时</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table></div>`;
+
+    $('#backfillSlowSteps').html(table);
+}
+
+function renderBackfillStep(step) {
+    const statusMap = {
+        pending: { label: '待执行', cls: 'secondary' },
+        running: { label: '进行中', cls: 'primary' },
+        success: { label: '完成', cls: 'success' },
+        failed: { label: '失败', cls: 'danger' }
+    };
+    const info = statusMap[step.status] || statusMap.pending;
+    const desc = step.error ? `错误: ${escapeHtml(step.error)}` : escapeHtml(step.message || '');
+    return `<div class="d-flex justify-content-between align-items-start border rounded px-2 py-1 mb-1">
+        <div>
+            <div class="fw-semibold">${escapeHtml(step.name || '')}</div>
+            <small class="text-muted">${desc}</small>
+        </div>
+        <span class="badge bg-${info.cls}">${info.label}</span>
+    </div>`;
+}
+
+function renderPipelineStages(summary) {
+    const current = summary.pipeline_current_stage || null;
+    if (current && current.stage) {
+        const rangeText = `${escapeHtml(current.start_date || '-') } ~ ${escapeHtml(current.end_date || '-')}`;
+        $('#pipelineCurrentStage').html(
+            `<div class="border rounded p-2 bg-light">
+                <div class="fw-semibold">当前阶段: ${escapeHtml(current.stage)}</div>
+                <small class="text-muted">区间: ${rangeText}</small>
+            </div>`
+        );
+    } else {
+        $('#pipelineCurrentStage').html('<small class="text-muted">当前阶段: -</small>');
+    }
+
+    const recent = Array.isArray(summary.pipeline_recent_stages) ? summary.pipeline_recent_stages : [];
+    if (!recent.length) {
+        $('#pipelineRecentStages').html('<small class="text-muted">暂无阶段记录</small>');
+    } else {
+        const html = recent.slice().reverse().slice(0, 8).map(item => {
+            const badgeClass = item.status === 'success' ? 'success' : (item.status === 'failed' ? 'danger' : 'primary');
+            const rangeText = `${escapeHtml(item.start_date || '-') } ~ ${escapeHtml(item.end_date || '-')}`;
+            const errText = item.error ? `<div class="small text-danger">${escapeHtml(item.error)}</div>` : '';
+            return `<div class="border rounded px-2 py-1 mb-1">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <div class="fw-semibold">${escapeHtml(item.stage || '-')}</div>
+                        <small class="text-muted">${rangeText}</small>
+                    </div>
+                    <div class="text-end">
+                        <span class="badge bg-${badgeClass}">${escapeHtml(item.status || '-')}</span>
+                        <div><small class="text-muted">${formatDuration(item.elapsed_seconds)}</small></div>
+                    </div>
+                </div>
+                ${errText}
+            </div>`;
+        }).join('');
+        $('#pipelineRecentStages').html(html);
+    }
+
+    const slow = Array.isArray(summary.pipeline_slowest_stages) ? summary.pipeline_slowest_stages : [];
+    if (!slow.length) {
+        $('#pipelineSlowStages').html('<small class="text-muted">暂无阶段耗时统计</small>');
+    } else {
+        const rows = slow.map((item, idx) => {
+            const rangeText = `${escapeHtml(item.start_date || '-') }~${escapeHtml(item.end_date || '-')}`;
+            return `<tr>
+                <td>${idx + 1}</td>
+                <td>${escapeHtml(item.stage || '-')}</td>
+                <td>${rangeText}</td>
+                <td>${escapeHtml(item.status || '-')}</td>
+                <td>${formatDuration(item.elapsed_seconds)}</td>
+            </tr>`;
+        }).join('');
+
+        $('#pipelineSlowStages').html(`<div class="table-responsive"><table class="table table-sm mb-0">
+            <thead><tr><th>#</th><th>阶段</th><th>区间</th><th>状态</th><th>耗时</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table></div>`);
+    }
+}
+
+function collectSingleDataset(collectKey, label) {
+    if (!collectKey) return;
+    $.ajax({
+        url: '/api/backfill/collect-dataset',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ collect_key: collectKey }),
+        success: function(r) {
+            if (r.code === 200) {
+                showToast(r.message || `${label} 已开始采集`, 'success');
+                loadBackfillProgress();
+                loadDatasetInventory();
+            } else {
+                showToast(r.message || '单项采集触发失败', 'error');
+            }
+        },
+        error: function(xhr) {
+            const msg = (xhr.responseJSON && xhr.responseJSON.message) || '单项采集触发失败';
+            showToast(msg, 'error');
+        }
+    });
+}
+
+function loadDatasetInventory() {
+    $.ajax({
+        url: '/api/backfill/dataset-inventory',
+        method: 'GET',
+        success: function(r) {
+            if (!(r && r.code === 200 && Array.isArray(r.data))) {
+                $('#datasetInventoryBox').html('<small class="text-muted">暂无数据资产盘点</small>');
+                return;
+            }
+            const rows = r.data.map(item => {
+                const badgeClass = item.status === 'ready'
+                    ? 'success'
+                    : (item.status === 'empty' ? 'warning text-dark' : 'secondary');
+                const actionHtml = (item.collectable && item.collect_key)
+                    ? `<button class="btn btn-sm btn-${item.status === 'ready' ? 'outline-secondary' : 'outline-primary'} single-collect-btn" data-key="${escapeHtml(item.collect_key)}" data-name="${escapeHtml(item.name || '')}">
+                            <i class="fas fa-cloud-arrow-down"></i> ${escapeHtml(item.collect_action_text || '单独采集')}
+                       </button>`
+                    : '<span class="text-muted">--</span>';
+                return `<tr>
+                    <td>${escapeHtml(item.name || '-')}</td>
+                    <td>${escapeHtml(item.category || '-')}</td>
+                    <td>${Number(item.row_count || 0).toLocaleString('zh-CN')}</td>
+                    <td>${escapeHtml(item.coverage_text || '--')}</td>
+                    <td>${escapeHtml(item.latest_update || '--')}</td>
+                    <td><span class="badge bg-${badgeClass}">${escapeHtml(item.status_text || '待校验')}</span></td>
+                    <td><small class="text-muted">${escapeHtml(item.note || '--')}</small></td>
+                    <td>${actionHtml}</td>
+                </tr>`;
+            }).join('');
+            $('#datasetInventoryBox').html(`<div class="table-responsive"><table class="table table-sm align-middle mb-0">
+                <thead><tr><th>数据类型</th><th>来源</th><th>数据量</th><th>覆盖标的</th><th>最近更新时间</th><th>状态</th><th>备注</th><th>操作</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table></div>`);
+
+            $('.single-collect-btn').off('click').on('click', function() {
+                const collectKey = $(this).data('key');
+                const label = $(this).data('name') || '该数据类型';
+                collectSingleDataset(collectKey, label);
+            });
+        },
+        error: function() {
+            $('#datasetInventoryBox').html('<small class="text-danger">数据资产盘点加载失败</small>');
+        }
+    });
+}
+
+function retryStep(stepName) {
+    $.ajax({
+        url: '/api/backfill/retry-step',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ step_name: stepName }),
+        success: function(r) {
+            if (r.code === 200) {
+                showToast(r.message || '已触发重试', 'success');
+                loadBackfillProgress();
+            } else {
+                showToast(r.message || '重试触发失败', 'error');
+            }
+        },
+        error: function(xhr) {
+            const msg = (xhr.responseJSON && xhr.responseJSON.message) || '重试触发失败';
+            showToast(msg, 'error');
+        }
+    });
+}
+
+function renderFailedSteps(failedSteps) {
+    if (!Array.isArray(failedSteps) || failedSteps.length === 0) {
+        $('#failedStepList').html('<small class="text-muted">暂无失败项</small>');
+        return;
+    }
+
+    const html = failedSteps.map(item => {
+        const err = item.error ? `<div class="small text-danger mt-1">${escapeHtml(item.error)}</div>` : '';
+        const msg = item.message ? `<div class="small text-muted mt-1">${escapeHtml(item.message)}</div>` : '';
+        const btn = item.retryable
+            ? `<button class="btn btn-sm btn-outline-primary retry-step-btn" data-step="${escapeHtml(item.name || '')}"><i class="fas fa-rotate-right"></i> 重试此项</button>`
+            : '<span class="badge bg-secondary">不可重试</span>';
+
+        return `<div class="border rounded p-2 mb-2 d-flex justify-content-between align-items-start gap-2">
+            <div>
+                <div class="fw-semibold">${escapeHtml(item.name || '')}</div>
+                ${msg}
+                ${err}
+            </div>
+            <div>${btn}</div>
+        </div>`;
+    }).join('');
+
+    $('#failedStepList').html(html);
+    $('.retry-step-btn').off('click').on('click', function() {
+        const stepName = $(this).data('step');
+        if (!stepName) return;
+        retryStep(stepName);
+    });
+}
+
+function loadBackfillProgress() {
+    $.ajax({
+        url: '/api/backfill/progress',
+        method: 'GET',
+        success: function(r) {
+            if (!(r && r.code === 200 && r.data)) return;
+            const p = r.data;
+            const summary = r.summary || {};
+            const percent = Number(summary.progress_percent_days || p.progress_percent || 0);
+
+            $('#totalDays').text(summary.total_days || 0);
+            $('#completedDays').text(summary.completed_days || 0);
+            $('#successDays').text(summary.success_days || 0);
+            $('#failedDays').text(summary.failed_days || 0);
+
+            $('#backfillPercent').text(`${percent}%`);
+            $('#backfillMessage').text(p.message || '');
+            $('#backfillCurrentStep').text(p.current_step || '-');
+            $('#backfillCurrentElapsed').text(formatDuration(summary.current_step_elapsed_seconds));
+            $('#backfillTotalElapsed').text(formatDuration(summary.elapsed_total_seconds));
+            $('#backfillAvgDayElapsed').text(formatDuration(summary.avg_day_duration_seconds));
+            $('#backfillCompleted').text(`${p.completed_steps || 0}/${p.total_steps || 0}`);
+            $('#backfillSuccess').text(p.success_steps || 0);
+            $('#backfillFailed').text(p.failed_steps || 0);
+
+            $('#backfillProgressBar')
+                .css('width', `${percent}%`)
+                .attr('aria-valuenow', percent);
+
+            const statusBadge = $('#backfillStatusBadge');
+            statusBadge.removeClass('bg-secondary bg-primary bg-success bg-warning');
+            if (p.running) {
+                statusBadge.addClass('bg-primary').text('运行中');
+                $('#backfillProgressBar').removeClass('bg-success bg-warning').addClass('bg-primary');
+            } else if ((p.failed_steps || 0) > 0) {
+                statusBadge.addClass('bg-warning').text('已结束(部分失败)');
+                $('#backfillProgressBar').removeClass('bg-primary bg-success').addClass('bg-warning');
+            } else {
+                statusBadge.addClass('bg-success').text('已结束');
+                $('#backfillProgressBar').removeClass('bg-primary bg-warning').addClass('bg-success');
+            }
+
+            const steps = Array.isArray(p.steps) ? p.steps : [];
+            if (!steps.length) {
+                $('#backfillSteps').html('<small class="text-muted">暂无步骤信息</small>');
+            } else {
+                const windowSteps = buildBackfillStepWindow(steps);
+                const hiddenCount = Math.max(0, steps.length - windowSteps.length);
+                const tip = hiddenCount > 0
+                    ? `<div class="mb-2"><small class="text-muted">步骤较多，仅展示关键与最近步骤（已折叠 ${hiddenCount} 项）</small></div>`
+                    : '';
+                $('#backfillSteps').html(tip + windowSteps.map(renderBackfillStep).join(''));
+            }
+
+            renderRecentSteps(summary.recent_steps || []);
+            renderSlowSteps(summary.slowest_steps || []);
+            renderPipelineStages(summary);
+            renderFailedSteps(summary.failed_steps || []);
+        },
+        error: function() {
+            showToast('获取补采进度失败', 'error');
+        }
+    });
+}
+
+$('#startBackfillBtn').on('click', function() {
+    $.ajax({
+        url: '/api/backfill/start',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ mode: 'missing_only' }),
+        success: function(r) {
+            if (r.code === 200) {
+                showToast(r.message || '补采任务已启动', 'success');
+                loadBackfillProgress();
+            } else {
+                showToast(r.message || '启动失败', 'error');
+            }
+        },
+        error: function(xhr) {
+            const msg = (xhr.responseJSON && xhr.responseJSON.message) || '启动失败';
+            showToast(msg, 'error');
+        }
+    });
+});
+
+$(document).ready(function() {
+    loadBackfillProgress();
+    loadDatasetInventory();
+    setInterval(() => {
+        if (document.hasFocus()) {
+            loadBackfillProgress();
+            loadDatasetInventory();
+        }
+    }, 10000);
+});
+</script>
+{% endblock %}

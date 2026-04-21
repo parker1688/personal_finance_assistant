@@ -1,0 +1,295 @@
+{% extends "base.html" %}
+
+{% block title %}仪表盘 - 个人AI理财助手{% endblock %}
+{% block page_title %}仪表盘{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+.insight-card { border: 1px solid #e9ecef; border-radius: 14px; background: linear-gradient(135deg, #f8fbff 0%, #ffffff 100%); }
+.insight-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; margin-right: 6px; margin-bottom: 6px; }
+.pill-green { background: #e8f7ee; color: #17824c; }
+.pill-yellow { background: #fff8e6; color: #9a6b00; }
+.pill-red { background: #fdecec; color: #bf2f45; }
+.pill-blue { background: #ecf4ff; color: #2357b7; }
+.workflow-stage { border: 1px solid #eef2f7; border-radius: 12px; padding: 12px; background: #fff; height: 100%; }
+.workflow-title { font-size: 15px; font-weight: 700; }
+.workflow-metric { font-size: 12px; color: #6c757d; margin-top: 6px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- 统计卡片 -->
+    <div class="row mb-4">
+        <div class="col-md-3 col-sm-6 mb-3">
+            <div class="stat-card">
+                <div class="stat-value" id="marketTemp">--°C</div>
+                <div class="stat-label">市场温度</div>
+                <div class="stat-trend" id="marketInterpretation">加载中...</div>
+            </div>
+        </div>
+        <div class="col-md-3 col-sm-6 mb-3">
+            <div class="stat-card">
+                <div class="stat-value" id="warningCount">--</div>
+                <div class="stat-label">今日预警</div>
+                <div class="stat-trend"><span id="highWarningCount">0</span> 高风险 · <span id="mediumWarningCount">0</span> 中风险</div>
+            </div>
+        </div>
+        <div class="col-md-3 col-sm-6 mb-3">
+            <div class="stat-card">
+                <div class="stat-value" id="recommendCount">--</div>
+                <div class="stat-label">推荐快照</div>
+                <div class="stat-trend" id="recommendBatchInfo">覆盖7个品类</div>
+            </div>
+        </div>
+        <div class="col-md-3 col-sm-6 mb-3">
+            <div class="stat-card">
+                <div class="stat-value" id="accuracyRate">--%</div>
+                <div class="stat-label">整体准确率</div>
+                <div class="stat-trend" id="accuracyTrend">近30天</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card insight-card mb-4">
+        <div class="card-body">
+            <div class="fw-bold mb-2"><i class="fas fa-comments-dollar"></i> 今日理财师摘要</div>
+            <div id="advisorBriefBox" class="text-muted small">加载中...</div>
+        </div>
+    </div>
+
+    <div class="card insight-card mb-4">
+        <div class="card-body">
+            <div class="fw-bold mb-3"><i class="fas fa-arrows-rotate"></i> AI 理财师工作流</div>
+            <div id="advisorWorkflowBox" class="text-muted small">加载中...</div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-lg-4 mb-3">
+            <div class="card insight-card h-100"><div class="card-body">
+                <div class="fw-bold mb-2"><i class="fas fa-user-shield"></i> 组合观点</div>
+                <div id="portfolioOverviewBox" class="text-muted small">加载中...</div>
+            </div></div>
+        </div>
+        <div class="col-lg-4 mb-3">
+            <div class="card insight-card h-100"><div class="card-body">
+                <div class="fw-bold mb-2"><i class="fas fa-heartbeat"></i> 模型健康</div>
+                <div id="modelHealthBox" class="text-muted small">加载中...</div>
+            </div></div>
+        </div>
+        <div class="col-lg-4 mb-3">
+            <div class="card insight-card h-100"><div class="card-body">
+                <div class="fw-bold mb-2"><i class="fas fa-bullseye"></i> 动作回测</div>
+                <div id="actionBacktestBox" class="text-muted small">加载中...</div>
+            </div></div>
+        </div>
+    </div>
+
+    <!-- 准确率趋势图 -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header"><i class="fas fa-chart-line"></i> 准确率趋势</div>
+                <div class="card-body"><div id="accuracyChart" style="height: 300px;"></div></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 推荐品类分布 -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header"><i class="fas fa-chart-pie"></i> 推荐品类分布</div>
+                <div class="card-body"><div id="recommendChart" style="height: 300px;"></div></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 最近预警 -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <i class="fas fa-bell"></i> 最近预警
+                    <a href="{{ url_for('warnings') }}" class="float-end text-decoration-none">查看全部 <i class="fas fa-arrow-right"></i></a>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table-custom">
+                            <thead><tr><th>时间</th><th>标的</th><th>类型</th><th>内容</th><th>级别</th></tr></thead>
+                            <tbody id="warningList"><tr><td colspan="5" class="text-center">加载中...</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let accuracyChart = null;
+let recommendChart = null;
+
+function riskPillClass(level) {
+    if (level === 'high' || level === 'risk') return 'pill-red';
+    if (level === 'medium' || level === 'warning') return 'pill-yellow';
+    return 'pill-green';
+}
+
+function loadDashboardData() {
+    $.ajax({
+        url: '/api/dashboard/summary',
+        method: 'GET',
+        dataType: 'json',
+        success: function(response) {
+            if (response.code === 200 && response.data) {
+                const data = response.data;
+                
+                $('#marketTemp').text(data.market_temperature + '°C');
+                $('#marketInterpretation').text((data.advisor_brief && data.advisor_brief.headline) ? data.advisor_brief.headline : data.market_interpretation);
+                $('#warningCount').text(data.today_warnings.total);
+                $('#highWarningCount').text(data.today_warnings.high);
+                $('#mediumWarningCount').text(data.today_warnings.medium);
+                $('#recommendCount').text(data.today_recommendations.total);
+                $('#recommendBatchInfo').text(data.recommendation_batch_date ? `最新批次 ${data.recommendation_batch_date}` : '暂无推荐快照');
+                $('#accuracyRate').text(data.has_review_data && data.overall_accuracy !== null ? data.overall_accuracy + '%' : '--%');
+                $('#accuracyTrend').text(data.has_review_data ? '近30天' : `待验证 ${data.pending_validation_count || 0} 条`);
+
+                const brief = data.advisor_brief || {};
+                const briefBullets = Array.isArray(brief.bullets) ? brief.bullets : [];
+                const briefRiskText = brief.risk === 'high' ? '高风险' : (brief.risk === 'medium' ? '中风险' : '低风险');
+                const briefStanceMap = { defensive: '防守', balanced: '均衡', constructive: '进攻' };
+                $('#advisorBriefBox').html(`
+                    <div>
+                        <span class="insight-pill ${riskPillClass(brief.risk)}">${briefRiskText}</span>
+                        <span class="insight-pill pill-blue">${briefStanceMap[brief.stance] || '均衡'}</span>
+                    </div>
+                    <div class="mt-2 fw-bold">${escapeHtml(brief.headline || '今日建议：均衡配置，控制节奏')}</div>
+                    <ul class="mt-2 mb-2 ps-3">${briefBullets.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+                    <div class="text-muted">温度依据：${escapeHtml((data.market_temperature_detail || {}).data_source || 'FALLBACK')}</div>
+                `);
+
+                const workflow = data.advisor_workflow || {};
+                const workflowStages = Array.isArray(workflow.stages) ? workflow.stages : [];
+                $('#advisorWorkflowBox').html(`
+                    <div class="mb-2 fw-bold">${escapeHtml(workflow.headline || 'AI 理财师工作流')}</div>
+                    <div class="row g-3">
+                        ${workflowStages.map(stage => `
+                            <div class="col-lg-4">
+                                <div class="workflow-stage">
+                                    <div>
+                                        <span class="insight-pill ${riskPillClass(stage.status === 'good' ? 'low' : (stage.status === 'warning' ? 'high' : (stage.status === 'active' ? 'medium' : 'low')))}">${stage.title}</span>
+                                    </div>
+                                    <div class="workflow-title mt-1">${escapeHtml(stage.subtitle || '')}</div>
+                                    <div class="workflow-metric">${(stage.metrics || []).map(item => `<div><strong>${escapeHtml(item.label)}：</strong>${escapeHtml(item.value)}</div>`).join('')}</div>
+                                    <div class="mt-2 text-muted">${escapeHtml(stage.next_action || '')}</div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `);
+
+                const portfolio = data.portfolio_overview || {};
+                const stanceMap = { defensive: '防守', balanced: '均衡', constructive: '进攻' };
+                $('#portfolioOverviewBox').html(`
+                    <div>
+                        <span class="insight-pill ${riskPillClass(portfolio.overall_risk)}">${portfolio.overall_risk === 'high' ? '高风险' : (portfolio.overall_risk === 'medium' ? '中风险' : '低风险')}</span>
+                        <span class="insight-pill pill-blue">${stanceMap[portfolio.stance] || '均衡'}</span>
+                        <span class="insight-pill pill-green">健康分 ${portfolio.health_score ?? '--'}</span>
+                    </div>
+                    <div class="mt-2">${escapeHtml(portfolio.summary || '暂无组合建议')}</div>
+                    <div class="mt-2 text-muted">持仓 ${portfolio.holding_count ?? 0} 项 · 建议现金 ${portfolio.recommended_cash_ratio_pct ?? 25}%</div>
+                `);
+
+                const model = data.model_health || {};
+                const modelRows = Array.isArray(model.models) ? model.models : [];
+                $('#modelHealthBox').html(`
+                    <div>
+                        <span class="insight-pill ${riskPillClass(model.overall_status)}">${model.overall_status === 'healthy' ? '健康' : (model.overall_status === 'warning' ? '预警' : '风险')}</span>
+                        <span class="insight-pill pill-blue">${model.passed_count ?? 0}/${model.total_models ?? 0} 通过</span>
+                    </div>
+                    <div class="mt-2">${modelRows.map(item => `<div>${item.period_days}日：${item.passed ? '通过' : '待优化'}${item.accuracy != null ? ` · Acc ${(Number(item.accuracy) * 100).toFixed(1)}%` : ''}</div>`).join('') || '暂无模型评估数据'}</div>
+                    <div class="mt-2 text-muted">状态 ${model.overall_status === 'healthy' ? '稳定可用' : (model.overall_status === 'warning' ? '建议观察' : '建议降权使用')}</div>
+                `);
+
+                const backtest = data.action_backtest || {};
+                const hasBacktestSamples = !!backtest.has_action_samples;
+                const backtestGrade = backtest.overall_grade || 'N/A';
+                const backtestPill = hasBacktestSamples
+                    ? riskPillClass(backtestGrade === 'A' || backtestGrade === 'B' ? 'low' : (backtestGrade === 'C' ? 'medium' : 'high'))
+                    : 'pill-blue';
+                $('#actionBacktestBox').html(`
+                    <div>
+                        <span class="insight-pill ${backtestPill}">${hasBacktestSamples ? `评级 ${backtestGrade}` : '样本积累中'}</span>
+                        <span class="insight-pill pill-blue">${hasBacktestSamples ? `综合 ${(backtest.overall_accuracy ?? 0)}%` : `样本 ${backtest.sample_size || 0}`}</span>
+                    </div>
+                    <div class="mt-2">${hasBacktestSamples ? `止盈 ${backtest.take_profit_grade || 'N/A'} · 加仓 ${backtest.add_signal_grade || 'N/A'}` : '已开启自动验证，等待更多到期预测形成回测结果'}</div>
+                    <div class="mt-2 text-muted">${escapeHtml(backtest.recommendation || '暂无动作回测数据')}</div>
+                `);
+                
+                // 更新预警列表
+                if (data.recent_warnings && data.recent_warnings.length > 0) {
+                    let html = '';
+                    for (const w of data.recent_warnings) {
+                        const levelClass = w.level === 'high' ? 'badge-high' : 'badge-medium';
+                        const levelText = w.level === 'high' ? '高风险' : '中风险';
+                        html += `<tr>
+                            <td>${w.time}</td>
+                            <td><strong>${escapeHtml(w.name)}</strong><br><small class="text-muted">${w.code}</small></td>
+                            <td>${w.type}</td>
+                            <td>${escapeHtml(w.message)}</td>
+                            <td><span class="${levelClass}">${levelText}</span></td>
+                        </tr>`;
+                    }
+                    $('#warningList').html(html);
+                } else {
+                    $('#warningList').html('<tr><td colspan="5" class="text-center">暂无预警</td></tr>');
+                }
+                
+                // 绘制准确率趋势图
+                if (accuracyChart) accuracyChart.dispose();
+                accuracyChart = echarts.init(document.getElementById('accuracyChart'));
+                const dates = data.accuracy_trend.map(item => item.date);
+                const accuracies = data.accuracy_trend.map(item => item.accuracy);
+                accuracyChart.setOption({
+                    tooltip: { trigger: 'axis' },
+                    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+                    xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45 } },
+                    yAxis: { type: 'value', name: '准确率 (%)', min: 0, max: 100 },
+                    series: [{ name: '准确率', type: 'line', data: accuracies, smooth: true, lineStyle: { color: '#00d4ff', width: 3 }, areaStyle: { opacity: 0.1 } }]
+                });
+                
+                // 绘制推荐品类分布图
+                if (recommendChart) recommendChart.dispose();
+                recommendChart = echarts.init(document.getElementById('recommendChart'));
+                const categories = [];
+                const counts = [];
+                for (const [key, value] of Object.entries(data.today_recommendations)) {
+                    if (key !== 'total' && value > 0) {
+                        const nameMap = { 'a_stock': 'A股', 'hk_stock': '港股', 'us_stock': '美股', 'active_fund': '主动基金', 'etf': 'ETF', 'gold': '黄金', 'silver': '白银' };
+                        categories.push(nameMap[key] || key);
+                        counts.push(value);
+                    }
+                }
+                recommendChart.setOption({
+                    tooltip: { trigger: 'item' },
+                    legend: { orient: 'vertical', left: 'left' },
+                    series: [{ type: 'pie', radius: '50%', data: categories.map((name, i) => ({ name, value: counts[i] })), emphasis: { itemStyle: { shadowBlur: 10 } } }]
+                });
+            }
+        },
+        error: function() {
+            $('#warningList').html('<tr><td colspan="5" class="text-center text-danger">加载失败，请刷新重试</td></tr>');
+        }
+    });
+}
+
+$(document).ready(function() {
+    loadDashboardData();
+    setInterval(loadDashboardData, 30000);
+    $(window).resize(function() { if (accuracyChart) accuracyChart.resize(); if (recommendChart) recommendChart.resize(); });
+});
+</script>
+{% endblock %}

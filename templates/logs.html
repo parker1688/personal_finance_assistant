@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}系统日志 - 个人AI理财助手{% endblock %}
+{% block page_title %}系统日志{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-2"><select id="sourceFilter" class="form-select"><option value="all">全部来源</option><option value="system">系统日志</option><option value="training">训练日志</option></select></div>
+                <div class="col-md-2"><select id="levelFilter" class="form-select"><option value="">全部级别</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option><option value="DEBUG">DEBUG</option></select></div>
+                <div class="col-md-2"><input type="date" id="startDate" class="form-control" placeholder="开始日期"></div>
+                <div class="col-md-2"><input type="date" id="endDate" class="form-control" placeholder="结束日期"></div>
+                <div class="col-md-3"><input type="text" id="keywordSearch" class="form-control" placeholder="关键词搜索"></div>
+                <div class="col-md-1"><button class="btn btn-primary w-100" id="searchBtn"><i class="fas fa-search"></i></button></div>
+            </div>
+            <div class="row mt-3"><div class="col text-end"><button class="btn btn-sm btn-outline-success" id="exportLogsBtn"><i class="fas fa-download"></i> 导出日志</button><button class="btn btn-sm btn-outline-danger ms-2" id="clearLogsBtn"><i class="fas fa-trash"></i> 清空日志</button></div></div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header"><i class="fas fa-list-alt"></i> 日志记录<span class="float-end text-muted" id="logCount">共 0 条</span></div>
+        <div class="card-body p-0">
+            <div class="table-responsive"><table class="table table-hover table-sm mb-0"><thead class="table-light"><tr><th style="width:160px">时间</th><th style="width:80px">级别</th><th style="width:120px">模块</th><th>内容</th></tr></thead><tbody id="logList"><tr><td colspan="4" class="text-center py-4">加载中...</td></tr></tbody></table></div>
+            <div class="card-footer bg-white"><nav><ul class="pagination justify-content-center mb-0" id="pagination"></ul></nav></div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentPage = 1, currentSource = 'all', currentLevel = '', currentStartDate = '', currentEndDate = '', currentKeyword = '';
+
+function loadLogs() {
+    let url = `/api/logs?page=${currentPage}&size=50&source=${currentSource}`;
+    if (currentLevel) url += `&level=${currentLevel}`;
+    if (currentStartDate) url += `&start_date=${currentStartDate}`;
+    if (currentEndDate) url += `&end_date=${currentEndDate}`;
+    if (currentKeyword) url += `&keyword=${encodeURIComponent(currentKeyword)}`;
+    $.ajax({ url: url, method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) {
+            const items = r.data.items || [], total = r.data.total || 0;
+            $('#logCount').text(`共 ${total} 条`);
+            if (items.length) {
+                let html = '';
+                for (const log of items) {
+                    const levelClass = log.level==='ERROR'?'text-danger fw-bold':(log.level==='WARNING'?'text-warning fw-bold':'text-info');
+                    html += `<tr><td style="white-space:nowrap">${log.log_time||log.time}</td><td><span class="${levelClass}">${log.level}</span></td><td>${log.module||'-'}</td><td style="word-break:break-word">${escapeHtml(log.message)}</td></tr>`;
+                }
+                $('#logList').html(html);
+                updatePagination(total, r.data.page, r.data.size);
+            } else { $('#logList').html('<tr><td colspan="4" class="text-center">暂无日志记录</td></tr>'); }
+        }
+    }, error: function() { $('#logList').html('<tr><td colspan="4" class="text-center text-danger">加载失败</td></tr>'); } });
+}
+
+function updatePagination(total, page, size) {
+    const totalPages = Math.ceil(total / size);
+    if (totalPages <= 1) { $('#pagination').empty(); return; }
+    let html = `<li class="page-item ${page<=1?'disabled':''}"><a class="page-link" href="#" data-page="${page-1}">上一页</a></li>`;
+    for (let i=Math.max(1,page-4); i<=Math.min(totalPages,page+5); i++) html += `<li class="page-item ${i===page?'active':''}"><a class="page-link" href="#" data-page="${i}">${i}</a></li>`;
+    html += `<li class="page-item ${page>=totalPages?'disabled':''}"><a class="page-link" href="#" data-page="${page+1}">下一页</a></li>`;
+    $('#pagination').html(html);
+    $('.page-link').off('click').on('click', function(e) { e.preventDefault(); const np = $(this).data('page'); if (np && np!==currentPage) { currentPage = np; loadLogs(); } });
+}
+
+$('#searchBtn').on('click', function() { currentSource = $('#sourceFilter').val(); currentLevel = $('#levelFilter').val(); currentStartDate = $('#startDate').val(); currentEndDate = $('#endDate').val(); currentKeyword = $('#keywordSearch').val(); currentPage = 1; loadLogs(); });
+$('#keywordSearch').on('keypress', function(e) { if (e.which===13) $('#searchBtn').click(); });
+$('#exportLogsBtn').on('click', function() { let url = '/api/logs/export?'; if (currentSource) url += `source=${currentSource}&`; if (currentLevel) url += `level=${currentLevel}&`; if (currentStartDate) url += `start_date=${currentStartDate}&`; if (currentEndDate) url += `end_date=${currentEndDate}&`; if (currentKeyword) url += `keyword=${encodeURIComponent(currentKeyword)}&`; window.location.href = url; });
+$('#clearLogsBtn').on('click', function() { if (confirm('确定清空所有日志吗？此操作不可恢复！')) { $.ajax({ url: '/api/logs', method: 'DELETE', success: function(r) { if (r.code===200) { showToast('日志已清空', 'success'); currentPage = 1; loadLogs(); } else { showToast('清空失败: '+r.message, 'error'); } } }); } });
+
+$(document).ready(function() {
+    const today = new Date();
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(today.getDate()-7);
+    $('#endDate').val(today.toISOString().split('T')[0]);
+    $('#startDate').val(sevenDaysAgo.toISOString().split('T')[0]);
+
+    loadLogs();
+
+    setInterval(() => {
+        if (document.hasFocus()) {
+            loadLogs();
+        }
+    }, 10000);
+});
+</script>
+{% endblock %}

@@ -1,0 +1,351 @@
+{% extends "base.html" %}
+
+{% block title %}持仓管理 - 个人AI理财助手{% endblock %}
+{% block page_title %}持仓管理{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+.portfolio-health-card { border: 1px solid #e9ecef; border-radius: 14px; background: linear-gradient(135deg, #f8fbff 0%, #ffffff 100%); }
+.advisor-pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; margin-right: 6px; margin-bottom: 6px; }
+.pill-low { background: #e8f7ee; color: #17824c; }
+.pill-medium { background: #fff8e6; color: #9a6b00; }
+.pill-high { background: #fdecec; color: #bf2f45; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <button class="btn btn-custom" data-bs-toggle="modal" data-bs-target="#addHoldingModal"><i class="fas fa-plus"></i> 添加持仓</button>
+                    <button class="btn btn-outline-secondary ms-2" id="importBtn"><i class="fas fa-upload"></i> 导入CSV</button>
+                    <button class="btn btn-outline-secondary ms-2" id="exportBtn"><i class="fas fa-download"></i> 导出CSV</button>
+                </div>
+                <div class="col-md-6 text-end"><span class="text-muted">总资产: <strong id="totalValue">¥0</strong></span></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 未来信号仪表板 -->
+    <div id="futureSignalsContainer"></div>
+    
+    <div class="card mb-4"><div class="card-header"><i class="fas fa-briefcase"></i> 持仓列表</div><div class="card-body"><div class="table-responsive"><table class="table-custom"><thead><tr><th>类型</th><th>代码</th><th>名称</th><th>数量</th><th>成本价(¥)</th><th>当前价(¥)</th><th>市值(¥)</th><th>盈亏(¥)</th><th>盈亏率</th><th>操作</th></tr></thead><tbody id="holdingsList"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody></table></div></div></div>
+    
+    <div class="row"><div class="col-md-6"><div class="card"><div class="card-header"><i class="fas fa-chart-line"></i> 持仓市值趋势</div><div class="card-body"><div id="valueTrendChart" style="height:300px;"></div></div></div></div>
+    <div class="col-md-6"><div class="card"><div class="card-header"><i class="fas fa-chart-pie"></i> 资产类型分布</div><div class="card-body"><div id="assetTypeChart" style="height:300px;"></div></div></div></div></div>
+</div>
+
+<div class="modal fade" id="addHoldingModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title" id="holdingModalTitle">添加持仓</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+        <form id="addHoldingForm"><input type="hidden" id="editHoldingId" name="id">
+            <div class="mb-3"><label class="form-label">资产类型 *</label><select class="form-select" id="holdingAssetType" name="asset_type" required><option value="stock">股票</option><option value="fund">基金</option><option value="etf">ETF</option><option value="gold">黄金</option><option value="silver">白银</option></select></div>
+            <div class="mb-3"><label class="form-label">代码 *</label><input type="text" class="form-control" id="holdingCode" name="code" required placeholder="如: 600519.SH, AAPL, 0700.HK, 009478"><div id="holdingLookupHint" class="form-text text-muted">输入代码后会自动识别资产类型和名称</div></div>
+            <div class="mb-3"><label class="form-label">名称 *</label><input type="text" class="form-control" id="holdingName" name="name" required placeholder="可自动回填，也可手动修改"></div>
+            <div class="mb-3"><label class="form-label">持有数量 *</label><input type="number" class="form-control" name="quantity" required step="0.01" min="0.01"></div>
+            <div class="mb-3"><label class="form-label">成本价 *</label><input type="number" class="form-control" name="cost_price" required step="0.01" min="0"></div>
+            <div class="mb-3"><label class="form-label">买入日期</label><input type="date" class="form-control" name="buy_date"></div>
+            <div class="mb-3"><label class="form-label">备注</label><textarea class="form-control" name="notes" rows="2"></textarea></div>
+        </form>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-custom" id="saveHoldingBtn">保存</button></div>
+</div></div></div>
+
+<script>
+let valueChart = null, assetChart = null, holdingLookupTimer = null, lastAutofilledHoldingName = '';
+const holdingAssetTypeLabelMap = { stock:'股票', fund:'基金', etf:'ETF', gold:'黄金', silver:'白银' };
+
+function formatCurrency(v) { if (v===undefined||v===null) return '--'; const s = v>=0?'+':''; return `¥${s}${v.toFixed(2)}`; }
+
+function loadHoldings() {
+    $.ajax({ url: '/api/holdings', method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) {
+            const holdings = r.data.holdings || [];
+            const totalValue = r.data.total_value_cny || 0;
+            $('#totalValue').text(`¥${totalValue.toFixed(2)}`);
+            if (holdings.length) {
+                let html = '';
+                for (const h of holdings) {
+                    const profitClass = h.profit_cny >= 0 ? 'text-success' : 'text-danger';
+                    const assetTypeName = { 'stock':'股票', 'fund':'基金', 'etf':'ETF', 'gold':'黄金', 'silver':'白银' }[h.asset_type] || h.asset_type;
+                    html += `<tr>
+                        <td><span class="badge bg-secondary">${assetTypeName}</span></td>
+                        <td>${escapeHtml(h.code)}</td>
+                        <td><strong>${escapeHtml(h.name)}</strong></td>
+                        <td>${h.quantity}</td>
+                        <td>¥${h.cost_price_cny.toFixed(2)}</td>
+                        <td>¥${h.current_price_cny.toFixed(2)}</td>
+                        <td>¥${h.market_value_cny.toFixed(2)}</td>
+                        <td class="${profitClass}">${h.profit_cny>=0?'+':''}¥${h.profit_cny.toFixed(2)}</td>
+                        <td class="${profitClass}">${h.profit_rate_cny>=0?'+':''}${h.profit_rate_cny.toFixed(2)}%</td>
+                        <td><button class="btn btn-sm btn-outline-primary" onclick="editHolding(${h.id})">编辑</button> <button class="btn btn-sm btn-outline-danger" onclick="deleteHolding(${h.id})">删除</button></td>
+                    </tr>`;
+                }
+                $('#holdingsList').html(html);
+            } else { $('#holdingsList').html('<tr><td colspan="10" class="text-center">暂无持仓数据，请添加</td></tr>'); }
+            loadTrendChart(); loadAssetTypeChart(); loadFutureSignals();
+        }
+    }, error: function() { $('#holdingsList').html('<tr><td colspan="10" class="text-center text-danger">加载失败</td></tr>'); } });
+}
+
+function setHoldingLookupHint(message, tone = 'muted') {
+    const toneClass = tone === 'success' ? 'text-success' : (tone === 'warning' ? 'text-warning' : (tone === 'error' ? 'text-danger' : 'text-muted'));
+    $('#holdingLookupHint').removeClass('text-success text-warning text-danger text-muted').addClass(toneClass).text(message);
+}
+
+function autoLookupHolding(forceFill = false) {
+    const $code = $('#holdingCode');
+    const code = ($code.val() || '').trim().toUpperCase();
+    $code.val(code);
+
+    if (!code || code.length < 2) {
+        setHoldingLookupHint('输入代码后会自动识别资产类型和名称', 'muted');
+        return;
+    }
+
+    setHoldingLookupHint('正在识别代码...', 'muted');
+    $.ajax({
+        url: '/api/holdings/lookup',
+        method: 'GET',
+        data: { code },
+        success: function(r) {
+            if (!(r.code === 200 && r.data)) {
+                setHoldingLookupHint('未识别到资产信息，可手动填写', 'warning');
+                return;
+            }
+            const data = r.data || {};
+            if (data.code) $('#holdingCode').val(data.code);
+            if (data.asset_type) $('#holdingAssetType').val(data.asset_type);
+
+            const currentName = ($('#holdingName').val() || '').trim();
+            if (data.name && (!currentName || currentName === lastAutofilledHoldingName || forceFill)) {
+                $('#holdingName').val(data.name);
+                lastAutofilledHoldingName = data.name;
+            }
+
+            const assetText = holdingAssetTypeLabelMap[data.asset_type] || data.asset_type || '资产';
+            if (data.matched) {
+                setHoldingLookupHint(`已识别为${assetText}${data.name ? '：' + data.name : ''}`, 'success');
+            } else {
+                setHoldingLookupHint(`已推断为${assetText}，若名称不准确可手动修改`, 'warning');
+            }
+        },
+        error: function() {
+            setHoldingLookupHint('自动识别失败，可手动填写名称和类型', 'warning');
+        }
+    });
+}
+
+function editHolding(id) {
+    $.ajax({ url: `/api/holdings/${id}`, method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) {
+            const h = r.data;
+            $('#holdingModalTitle').text('编辑持仓'); $('#saveHoldingBtn').text('更新持仓');
+            $('#editHoldingId').val(h.id); $('#holdingAssetType').val(h.asset_type); $('#holdingCode').val(h.code); $('#holdingName').val(h.name);
+            lastAutofilledHoldingName = h.name || '';
+            setHoldingLookupHint('已加载当前持仓，可修改代码后自动重新识别', 'muted');
+            $('input[name="quantity"]').val(h.quantity); $('input[name="cost_price"]').val(h.cost_price); $('input[name="buy_date"]').val(h.buy_date||''); $('textarea[name="notes"]').val(h.notes||'');
+            $('#addHoldingModal').modal('show');
+        } else { showToast('获取持仓详情失败', 'error'); }
+    }, error: function() { showToast('网络错误', 'error'); } });
+}
+
+function deleteHolding(id) { if (confirm('确定删除这条持仓记录吗？')) { $.ajax({ url: `/api/holdings/${id}`, method: 'DELETE', success: function(r) { if (r.code===200) { loadHoldings(); showToast('删除成功', 'success'); } else { showToast('删除失败: '+r.message, 'error'); } } }); } }
+
+$('#saveHoldingBtn').on('click', function() {
+    const data = {}; $('#addHoldingForm').serializeArray().forEach(item => { if (item.value) data[item.name] = item.value; });
+    if (!data.code || !data.quantity || !data.cost_price) { showToast('请填写代码、数量和成本价', 'error'); return; }
+    if (!data.name) { showToast('请先输入代码等待自动识别，或手动填写名称', 'error'); return; }
+    const editId = $('#editHoldingId').val();
+    $.ajax({ url: editId ? `/api/holdings/${editId}` : '/api/holdings', method: editId ? 'PUT' : 'POST', contentType: 'application/json', data: JSON.stringify(data), success: function(r) {
+        if (r.code===200) { $('#addHoldingModal').modal('hide'); $('#addHoldingForm')[0].reset(); $('#editHoldingId').val(''); loadHoldings(); showToast(editId ? '更新成功' : '添加成功', 'success'); }
+        else { showToast('操作失败: '+r.message, 'error'); }
+    }, error: function() { showToast('网络错误', 'error'); } });
+});
+
+$('#addHoldingModal').on('hidden.bs.modal', function() {
+    $('#addHoldingForm')[0].reset();
+    $('#editHoldingId').val('');
+    $('#holdingModalTitle').text('添加持仓');
+    $('#saveHoldingBtn').text('保存');
+    lastAutofilledHoldingName = '';
+    setHoldingLookupHint('输入代码后会自动识别资产类型和名称', 'muted');
+});
+
+$('#holdingCode').on('input', function() {
+    clearTimeout(holdingLookupTimer);
+    holdingLookupTimer = setTimeout(() => autoLookupHolding(false), 450);
+});
+$('#holdingCode').on('blur', function() { autoLookupHolding(false); });
+
+function loadFutureSignals() {
+    $.ajax({ url: '/api/holdings/future-signals', method: 'GET', timeout: 10000, success: function(r) {
+        if (r.code!==200 || !r.data) { $('#futureSignalsContainer').html(''); return; }
+        const data = r.data;
+        const summary = data.summary || {};
+        const advice = data.portfolio_advice || {};
+        let html = '';
+
+        if (advice && Object.keys(advice).length > 0) {
+            const riskCls = advice.overall_risk === 'high' ? 'pill-high' : (advice.overall_risk === 'medium' ? 'pill-medium' : 'pill-low');
+            const riskText = advice.overall_risk === 'high' ? '高风险' : (advice.overall_risk === 'medium' ? '中风险' : '低风险');
+            const issues = (advice.key_issues || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+            const nextActions = (advice.next_actions || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+            html += `<div class="card mb-3 portfolio-health-card"><div class="card-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                    <div>
+                        <h5 class="mb-1"><i class="fas fa-user-shield"></i> 持仓组合诊断</h5>
+                        <div class="text-muted small">${escapeHtml(advice.summary_text || '暂无组合建议')}</div>
+                    </div>
+                    <div>
+                        <span class="advisor-pill ${riskCls}">${riskText}</span>
+                        <span class="advisor-pill pill-medium">健康分 ${advice.health_score || '--'}</span>
+                        <span class="advisor-pill pill-low">建议现金 ${advice.recommended_cash_ratio_pct || 25}%</span>
+                    </div>
+                </div>
+                <div class="row mt-3">
+                    <div class="col-md-4 mb-2"><div class="small text-muted">分散度</div><div class="fw-bold">${escapeHtml(advice.diversification_status || '中性')}</div></div>
+                    <div class="col-md-4 mb-2"><div class="small text-muted">最大仓位占比</div><div class="fw-bold">${Number(advice.concentration_ratio_pct || 0).toFixed(1)}%</div></div>
+                    <div class="col-md-4 mb-2"><div class="small text-muted">持仓数量</div><div class="fw-bold">${summary.holding_count || 0}</div></div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-6"><div class="small fw-bold mb-1">核心问题</div><ul class="small text-muted mb-0">${issues || '<li>暂无明显问题</li>'}</ul></div>
+                    <div class="col-md-6"><div class="small fw-bold mb-1">下一步动作</div><ul class="small text-muted mb-0">${nextActions || '<li>继续观察</li>'}</ul></div>
+                </div>
+            </div></div>`;
+        }
+
+        // 当前资产操作建议（小时级）
+        if (data.current_asset_actions && data.current_asset_actions.length > 0) {
+            html += '<div class="card mb-3"><div class="card-header bg-dark text-white"><i class="fas fa-bolt"></i> 当前资产操作建议（小时级）</div><div class="card-body">';
+            html += '<div class="row">';
+            for (const item of data.current_asset_actions) {
+                const action = item.action || '持有';
+                const actionCls = action === '清仓' ? 'danger' : (action === '减仓' ? 'warning' : (action === '增仓' ? 'success' : 'secondary'));
+                const level = item.level || 'low';
+                const levelText = level === 'high' ? '高风险' : (level === 'medium' ? '中风险' : '低风险');
+                const levelCls = level === 'high' ? 'danger' : (level === 'medium' ? 'warning' : 'secondary');
+
+                html += `<div class="col-md-6 col-lg-4 mb-3">
+                    <div class="card h-100 border-${actionCls} border-2">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <h6 class="card-title mb-1">${escapeHtml(item.name)}</h6>
+                                <span class="badge bg-${actionCls}">${escapeHtml(action)}</span>
+                            </div>
+                            <div class="small text-muted mb-2">${escapeHtml(item.code)} · <span class="badge bg-${levelCls}">${levelText}</span></div>
+                            <div class="small mb-2">${escapeHtml(item.message || '')}</div>
+                            <div class="small text-muted">建议：${escapeHtml(item.suggestion || '持续跟踪')}</div>
+                            <div class="small text-muted mt-1">复查：${item.review_in_days || 3}天</div>
+                        </div>
+                    </div>
+                </div>`;
+            }
+            html += '</div></div></div>';
+        }
+        
+        // 风险预警块 (红色)
+        if (data.risk_alerts && data.risk_alerts.length > 0) {
+            html += '<div class="alert alert-danger mb-3"><div class="row align-items-center"><div class="col"><h5 class="alert-heading"><i class="fas fa-exclamation-triangle"></i> 风险预警</h5>';
+            for (const alert of data.risk_alerts) {
+                const levelBadge = alert.level === 'high' ? '<span class="badge bg-danger">严重</span>' : '<span class="badge bg-warning">中等</span>';
+                html += `<div class="mt-2">
+                    ${levelBadge} <strong>${escapeHtml(alert.name)}</strong> (${escapeHtml(alert.code)})
+                    <div class="small text-dark mt-1">下跌概率: <strong>${alert.down_probability.toFixed(1)}%</strong></div>
+                    <div class="small text-dark">建议: 考虑减仓或设置止损</div>
+                </div>`;
+            }
+            html += '</div></div></div></div>';
+        }
+        
+        // 加仓/止盈建议块 (黄色)
+        if (data.action_suggestions && data.action_suggestions.length > 0) {
+            html += '<div class="alert alert-warning mb-3"><div class="row align-items-center"><div class="col"><h5 class="alert-heading"><i class="fas fa-lightbulb"></i> 操作建议</h5>';
+            for (const action of data.action_suggestions) {
+                const actionIcon = action.action === 'take_profit' ? '📈' : '📊';
+                const actionText = action.action === 'take_profit' ? '止盈' : '加仓';
+                html += `<div class="mt-2">
+                    ${actionIcon} <strong>${actionText}</strong> ${escapeHtml(action.name)} (${escapeHtml(action.code)})
+                    <div class="small text-dark mt-1">盈利率: <strong>${action.profit_rate.toFixed(1)}%</strong> | 理由: ${escapeHtml(action.reason)}</div>
+                </div>`;
+            }
+            html += '</div></div></div></div>';
+        }
+        
+        // 推荐资产块 (绿色)
+        if (data.unheld_recommendations && data.unheld_recommendations.length > 0) {
+            html += '<div class="card mb-4"><div class="card-header bg-success text-white"><i class="fas fa-star"></i> 推荐资产 (Top 5)</div><div class="card-body">';
+            html += '<div class="row">';
+            for (let i = 0; i < Math.min(5, data.unheld_recommendations.length); i++) {
+                const rec = data.unheld_recommendations[i];
+                const code = String(rec.code || '').toUpperCase();
+                const recommendationType = rec.type || (
+                    ['SI=F', 'SLV', 'SIVR', 'PSLV'].includes(code)
+                        ? 'silver'
+                        : (['GC=F', 'GLD', 'IAU', 'GLDM', 'SGOL'].includes(code) ? 'gold' : 'a_stock')
+                );
+                const searchKeyword = ['GC=F', 'SI=F'].includes(code) ? '' : encodeURIComponent(rec.code || '');
+                const jumpUrl = `/recommendations?type=${recommendationType}${searchKeyword ? `&keyword=${searchKeyword}` : ''}`;
+                html += `<div class="col-md-6 col-lg-4 mb-3">
+                    <div class="card h-100 border-success border-2">
+                        <div class="card-body">
+                            <h6 class="card-title">${escapeHtml(rec.name)}</h6>
+                            <div class="small"><span class="badge bg-info">${rec.type}</span></div>
+                            <div class="mt-2">
+                                <div class="small"><strong>代码:</strong> ${escapeHtml(rec.code)}</div>
+                                <div class="small"><strong>20日目标价:</strong> ¥${rec.target_price_20d?.toFixed(2) || '--'}</div>
+                                <div class="small"><strong>上涨概率:</strong> 
+                                    <span class="badge bg-success">${rec.up_probability_20d?.toFixed(1) || '--'}%</span>
+                                </div>
+                                <div class="small"><strong>评分:</strong> ${rec.score?.toFixed(1) || '--'}</div>
+                            </div>
+                            <div class="mt-2 text-muted small">${escapeHtml(rec.suggestion || '可关注')}</div>
+                            <div class="mt-2"><a class="btn btn-sm btn-outline-success" href="${jumpUrl}"><i class="fas fa-up-right-from-square"></i> 去推荐页查看</a></div>
+                        </div>
+                    </div>
+                </div>`;
+            }
+            html += '</div></div></div>';
+        }
+        
+        $('#futureSignalsContainer').html(html);
+    }, error: function() { console.log('future-signals 加载失败'); } });
+}
+
+function loadTrendChart() {
+    $.ajax({ url: '/api/holdings/trend', method: 'GET', success: function(r) {
+        if (valueChart) valueChart.dispose();
+        valueChart = echarts.init(document.getElementById('valueTrendChart'));
+        if (r.code===200 && r.data && r.data.dates && r.data.dates.length) {
+            valueChart.setOption({ tooltip: { trigger: 'axis' }, xAxis: { type: 'category', data: r.data.dates, axisLabel: { rotate: 45 } }, yAxis: { type: 'value', name: '总市值 (元)' }, series: [{ type: 'line', data: r.data.values, smooth: true, lineStyle: { color: '#00d4ff', width: 3 }, areaStyle: { opacity: 0.1 } }] });
+        } else { valueChart.setOption({ title: { text: '暂无数据', left: 'center', top: 'center' } }); }
+    } });
+}
+
+function loadAssetTypeChart() {
+    $.ajax({ url: '/api/holdings/asset_type_distribution', method: 'GET', success: function(r) {
+        if (assetChart) assetChart.dispose();
+        assetChart = echarts.init(document.getElementById('assetTypeChart'));
+        if (r.code===200 && r.data && r.data.length) {
+            assetChart.setOption({ tooltip: { trigger: 'item' }, legend: { orient: 'vertical', left: 'left' }, series: [{ type: 'pie', radius: '50%', data: r.data.map(d=>({ name: d.name, value: d.value })) }] });
+        } else { assetChart.setOption({ title: { text: '暂无数据', left: 'center', top: 'center' } }); }
+    } });
+}
+
+$('#exportBtn').on('click', function() { window.location.href = '/api/holdings/export'; });
+$('#importBtn').on('click', function() {
+    const input = document.createElement('input'); input.type = 'file'; input.accept = '.csv';
+    input.onchange = function(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const formData = new FormData(); formData.append('file', file);
+        $.ajax({ url: '/api/holdings/import', method: 'POST', data: formData, processData: false, contentType: false, success: function(r) { if (r.code===200) { loadHoldings(); showToast('导入成功', 'success'); } else { showToast('导入失败: '+r.message, 'error'); } } });
+    };
+    input.click();
+});
+
+$(document).ready(function() { loadHoldings(); loadFutureSignals(); $(window).resize(function() { if (valueChart) valueChart.resize(); if (assetChart) assetChart.resize(); }); });
+</script>
+{% endblock %}

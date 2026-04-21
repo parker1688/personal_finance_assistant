@@ -1,0 +1,782 @@
+{% extends "base.html" %}
+
+{% block title %}投资推荐 - 个人AI理财助手{% endblock %}
+{% block page_title %}投资推荐{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+.recommendation-cards .rec-card {
+    border: 1px solid #e9ecef;
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: #fff;
+}
+
+.recommendation-cards .rec-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.recommendation-cards .rec-title {
+    font-size: 0.96rem;
+    font-weight: 700;
+    margin-bottom: 2px;
+}
+
+.recommendation-cards .rec-meta {
+    color: #6c757d;
+    font-size: 0.8rem;
+}
+
+.recommendation-cards .rec-grid {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.recommendation-cards .rec-k {
+    color: #6c757d;
+    font-size: 0.74rem;
+}
+
+.recommendation-cards .rec-v {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.advisor-summary-card {
+    border: 1px solid #e9ecef;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #f8fbff 0%, #ffffff 100%);
+    padding: 14px 16px;
+    margin-bottom: 14px;
+}
+
+.advisor-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-right: 8px;
+    margin-bottom: 6px;
+}
+
+.advisor-buy, .advisor-add { background: #e8f7ee; color: #17824c; }
+.advisor-hold, .advisor-watch { background: #fff8e6; color: #9a6b00; }
+.advisor-reduce, .advisor-sell { background: #fdecec; color: #bf2f45; }
+.risk-low { background: #e8f7ee; color: #17824c; }
+.risk-medium { background: #fff8e6; color: #9a6b00; }
+.risk-high { background: #fdecec; color: #bf2f45; }
+
+.rec-summary {
+    margin-top: 8px;
+    color: #5f6b7a;
+    font-size: 0.82rem;
+    line-height: 1.45;
+}
+
+.horizon-pick-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.horizon-pick-card {
+    border: 1px solid #e9ecef;
+    border-radius: 12px;
+    background: #fff;
+    padding: 12px;
+}
+
+.strategy-framework-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.strategy-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.strategy-rotation-list {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+@media (max-width: 768px) {
+    .strategy-framework-grid,
+    .strategy-rotation-list { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+    .horizon-pick-grid { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 768px) {
+    .recommendation-cards {
+        display: none !important;
+    }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="card mb-4">
+        <div class="card-header">
+            <ul class="nav nav-tabs card-header-tabs" id="recommendationTabs" role="tablist">
+                <li class="nav-item"><button class="nav-link active" data-type="a_stock" data-bs-toggle="tab" type="button"><i class="fas fa-chart-line"></i> A股</button></li>
+                <li class="nav-item"><button class="nav-link" data-type="hk_stock" data-bs-toggle="tab" type="button"><i class="fas fa-chart-line"></i> 港股</button></li>
+                <li class="nav-item"><button class="nav-link" data-type="us_stock" data-bs-toggle="tab" type="button"><i class="fas fa-chart-line"></i> 美股</button></li>
+                <li class="nav-item"><button class="nav-link" data-type="active_fund" data-bs-toggle="tab" type="button"><i class="fas fa-chart-pie"></i> 主动基金</button></li>
+                <li class="nav-item"><button class="nav-link" data-type="etf" data-bs-toggle="tab" type="button"><i class="fas fa-chart-bar"></i> ETF</button></li>
+                <li class="nav-item"><button class="nav-link" data-type="gold" data-bs-toggle="tab" type="button"><i class="fas fa-coins"></i> 黄金</button></li>
+                <li class="nav-item"><button class="nav-link" data-type="silver" data-bs-toggle="tab" type="button"><i class="fas fa-gem"></i> 白银</button></li>
+            </ul>
+        </div>
+        <div class="card-body">
+            <div class="row mb-3">
+                <div class="col-md-6">
+                    <div class="btn-group" role="group">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-sort="score"><i class="fas fa-star"></i> 按评分</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-sort="probability_5d"><i class="fas fa-percent"></i> 按5日概率</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-sort="probability_20d"><i class="fas fa-percent"></i> 按20日概率</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" data-sort="probability_60d"><i class="fas fa-percent"></i> 按60日概率</button>
+                    </div>
+                </div>
+                <div class="col-md-6 text-end">
+                    <button class="btn btn-sm btn-custom" id="refreshBtn"><i class="fas fa-sync-alt"></i> 刷新推荐</button>
+                </div>
+            </div>
+            <div class="row mb-3">
+                <div class="col-12 col-md-8">
+                    <div class="input-group input-group-sm">
+                        <span class="input-group-text"><i class="fas fa-search"></i></span>
+                        <input type="text" class="form-control" id="searchKeyword" placeholder="搜索代码/名称">
+                        <button class="btn btn-outline-secondary" type="button" id="clearSearchBtn">清空</button>
+                    </div>
+                </div>
+            </div>
+            <div id="advisorSummary" style="display:none;"></div>
+            <div id="systemQualityAlert" style="display:none;"></div>
+            <div id="loading" class="text-center py-5"><div class="loading"></div><p class="mt-2">加载推荐数据...</p></div>
+            <div id="recommendationTable" style="display:none;">
+                <div class="table-responsive">
+                    <table class="table-custom">
+                        <thead><tr><th>排名</th><th>标的</th><th>当前价</th><th>5日概率</th><th>20日概率</th><th>60日概率</th><th>综合评分</th><th>理财师建议</th><th>波动率</th><th>操作</th></tr></thead>
+                        <tbody id="recommendationList"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div id="recommendationCards" class="recommendation-cards" style="display:none;"></div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="detailModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title" id="detailTitle">标的详情</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body" id="detailContent"><div class="text-center py-4"><div class="loading"></div><p>加载中...</p></div></div>
+    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
+</div></div></div>
+
+<script>
+let currentType = 'a_stock', currentSort = 'score', currentOrder = 'desc';
+let currentKeyword = '';
+let searchDebounceTimer = null;
+
+function formatNumber(value, digits = 2, fallback = '--') {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return num.toFixed(digits);
+}
+
+function formatPrice(price, assetType) {
+    if (price === undefined || price === null) return '--';
+    const symbols = { 'us_stock': '$', 'hk_stock': 'HK$', 'a_stock': '¥', 'active_fund': '¥', 'etf': '¥', 'gold': '$', 'silver': '$' };
+    return `${symbols[assetType] || '¥'}${formatNumber(price, 2, '0.00')}`;
+}
+
+function formatPercent(value, fallback = '50.00') {
+    return `${formatNumber(value, 2, fallback)}%`;
+}
+
+function getProbabilityClass(prob) {
+    if (prob >= 60) return 'text-success fw-bold';
+    if (prob <= 40) return 'text-danger';
+    return 'text-warning';
+}
+
+function getActionMeta(action) {
+    const textMap = {
+        buy: '买入',
+        add: '加仓',
+        hold: '持有',
+        watch: '观察',
+        reduce: '减仓',
+        sell: '卖出'
+    };
+    return {
+        text: textMap[action] || '观察',
+        className: `advisor-chip advisor-${action || 'watch'}`
+    };
+}
+
+function getRiskMeta(level) {
+    const textMap = { low: '低风险', medium: '中风险', high: '高风险' };
+    return {
+        text: textMap[level] || '中风险',
+        className: `advisor-chip risk-${level || 'medium'}`
+    };
+}
+
+function getStrengthMeta(strength) {
+    const level = strength?.level || 'neutral_watch';
+    const text = strength?.label || '中性观察';
+    const className = strength?.class_name || 'advisor-watch';
+    return { text, className: `advisor-chip ${className}` };
+}
+
+function formatPositionAdvice(pct, withLabel = true, action = 'watch') {
+    const value = Number(pct || 0);
+    const currentAction = String(action || 'watch');
+    if (value > 0) return withLabel ? `建议仓位 ${value}%` : `${value}%`;
+    if (value < 0) return withLabel ? `建议减仓 ${Math.abs(value)}%` : `减仓 ${Math.abs(value)}%`;
+    if (currentAction === 'hold') return withLabel ? '持有为主，暂不追高' : '持有为主';
+    if (currentAction === 'watch') return withLabel ? '等待更好买点' : '先观察';
+    return withLabel ? '暂不新增仓位' : '观察';
+}
+
+function getConfidenceText(level) {
+    const textMap = {
+        high: '高',
+        medium: '中',
+        low: '低',
+        '较高': '较高',
+        '中等': '中等',
+        '较低': '较低'
+    };
+    return textMap[level] || level || '中';
+}
+
+function getReliabilityText(label) {
+    const textMap = {
+        supportive: '偏强支持',
+        stable: '稳定',
+        guarded: '谨慎',
+        high: '偏强支持',
+        medium: '稳定',
+        low: '谨慎'
+    };
+    return textMap[label] || label || '稳定';
+}
+
+function getReasonTagText(tag) {
+    if (!tag) return '';
+    const [key, value] = String(tag).split('=');
+    if (key === 'trend') {
+        const trendMap = { bullish: '趋势偏强', bearish: '趋势偏弱', neutral: '趋势震荡' };
+        return trendMap[value] || '趋势待确认';
+    }
+    if (key === 'score') return `综合评分 ${value}`;
+    if (key === 'risk') {
+        const riskMap = { low: '低风险', medium: '中风险', high: '高风险' };
+        return riskMap[value] || '风险待评估';
+    }
+    return String(tag);
+}
+
+function getReviewFocusText(item) {
+    const textMap = {
+        risk_control: '优先风控',
+        trend_confirmation: '确认趋势',
+        entry_timing: '把握入场节奏',
+        position_management: '分批管理仓位',
+        signal_refresh: '等待新信号',
+        wait_for_breakout: '等待突破确认'
+    };
+    return textMap[item] || item || '持续跟踪';
+}
+
+function formatHoldingText(rec) {
+    return rec.recommended_holding_period || rec.holding_advice?.holding_period_text || '建议持有 10-40个交易日';
+}
+
+function renderHorizonTopPicks(topPicks) {
+    const order = ['short', 'medium', 'long'];
+    const picks = order.map(key => topPicks?.[key]).filter(Boolean);
+    if (!picks.length) return '';
+    return `
+        <div class="advisor-summary-card">
+            <div class="fw-bold mb-2">⏱️ 按持有周期看最优资产</div>
+            <div class="horizon-pick-grid">
+                ${picks.map(item => `
+                    <div class="horizon-pick-card">
+                        <div class="fw-bold">${escapeHtml(item.label || '')}</div>
+                        <div class="mt-1">${escapeHtml(item.name || item.code || '')}</div>
+                        <div class="small text-muted">${escapeHtml(item.display_code || item.code || '')}</div>
+                        <div class="small mt-2">上涨概率 <strong>${formatPercent(item.probability)}</strong></div>
+                        <div class="small text-muted mt-1">${escapeHtml(item.holding_period_text || '')}</div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function renderStrengthSpotlight(items) {
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return '';
+    return `
+        <div class="advisor-summary-card">
+            <div class="fw-bold mb-2">🔥 当前最强候选</div>
+            <div class="horizon-pick-grid">
+                ${list.map(item => `
+                    <div class="horizon-pick-card">
+                        <div class="fw-bold">${escapeHtml(item.label || '中性观察')}</div>
+                        <div class="mt-1">${escapeHtml(item.name || item.code || '')}</div>
+                        <div class="small text-muted">${escapeHtml(item.display_code || item.code || '')}</div>
+                        <div class="small mt-2">20日概率 <strong>${formatPercent(item.probability_20d)}</strong></div>
+                        <div class="small text-muted mt-1">综合评分 ${formatNumber(item.total_score, 2, '0.00')}</div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function renderStrategyFramework(framework) {
+    const focus = Array.isArray(framework?.focus_industries) ? framework.focus_industries : [];
+    const flow = Array.isArray(framework?.screening_flow) ? framework.screening_flow : [];
+    const rebalancePlan = framework?.rebalance_plan || {};
+    if (!framework || !framework.headline) return '';
+
+    const regimeMap = { constructive: '进攻', balanced: '均衡', defensive: '防守' };
+    const policyMap = { supportive: '政策偏支持', neutral: '政策中性', cautious: '政策偏谨慎' };
+
+    return `
+        <div class="advisor-summary-card">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                <div>
+                    <div class="fw-bold mb-1">🧭 流程化推荐模式</div>
+                    <div class="text-muted small">系统已按“资产初筛 → 组合配置 → 动态调仓”完成本轮推荐，单个资产的详细理由请点详情查看。</div>
+                </div>
+                <div class="strategy-meta-row mb-0">
+                    <span class="advisor-chip advisor-hold">市场姿态：${escapeHtml(regimeMap[framework.macro_regime] || '均衡')}</span>
+                    <span class="advisor-chip advisor-watch">${escapeHtml(policyMap[framework.policy_bias] || '政策中性')}</span>
+                    <span class="advisor-chip advisor-hold">政策分 ${escapeHtml(String(framework.policy_score || '--'))}</span>
+                </div>
+            </div>
+            <div class="small text-muted mt-2">当前关注主线：${escapeHtml(focus.join(' / ') || '暂无明显主线')}</div>
+            ${flow.length ? `<div class="small text-muted mt-2">当前流程：${escapeHtml(flow.map(item => item.title).join(' → '))} · ${escapeHtml(rebalancePlan.review_cycle || '')}</div>` : ''}
+        </div>
+    `;
+}
+
+function renderPortfolioAdvice(advice) {
+    if (!advice) return '';
+    const stanceMap = { defensive: '防守', balanced: '均衡', constructive: '进攻' };
+    const priorityMap = { high: '优先处理', medium: '计划调整', low: '顺势优化' };
+    const riskMeta = getRiskMeta(advice.overall_risk || 'medium');
+    const actions = Array.isArray(advice.rebalance_actions) ? advice.rebalance_actions : [];
+    const allocation = advice.target_allocation || {};
+    return `
+        <div class="advisor-summary-card">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                <div>
+                    <div class="fw-bold mb-1">🧠 高级理财师观点</div>
+                    <div class="text-muted small">当前组合姿态：${stanceMap[advice.stance] || '均衡'} · ${priorityMap[advice.priority] || '计划调整'}</div>
+                </div>
+                <div>
+                    <span class="${riskMeta.className}">${riskMeta.text}</span>
+                    <span class="advisor-chip advisor-hold">建议现金 ${advice.recommended_cash_ratio_pct || 25}%</span>
+                </div>
+            </div>
+            <div class="rec-summary mt-2">${escapeHtml(advice.summary || '暂无组合摘要')}</div>
+            ${advice.review_cycle ? `<div class="small text-muted mt-2">调仓节奏：${escapeHtml(advice.review_cycle)}</div>` : ''}
+            ${(allocation.cash_pct ?? null) !== null ? `
+                <div class="small text-muted mt-2">建议分布：现金 ${escapeHtml(String(allocation.cash_pct || 0))}% / 核心仓 ${escapeHtml(String(allocation.core_pct || 0))}% / 卫星仓 ${escapeHtml(String(allocation.satellite_pct || 0))}% / 防御仓 ${escapeHtml(String(allocation.defense_pct || 0))}%</div>
+            ` : ''}
+            ${actions.length ? `
+                <ul class="small mt-2 mb-0 ps-3 text-muted">
+                    ${actions.slice(0, 3).map(item => `<li><strong>${escapeHtml(item.title || '')}</strong>：${escapeHtml(item.instruction || '')}</li>`).join('')}
+                </ul>
+            ` : ''}
+        </div>
+    `;
+}
+
+function loadSystemQualityAlert() {
+    $.ajax({
+        url: '/api/dashboard/summary',
+        method: 'GET',
+        success: function(response) {
+            if (!(response.code === 200 && response.data)) return;
+            const model = response.data.model_health || {};
+            const backtest = response.data.action_backtest || {};
+            const grade = backtest.overall_grade || 'N/A';
+            const status = model.overall_status || 'warning';
+            const hasBacktestSamples = !!backtest.has_action_samples;
+
+            if (!hasBacktestSamples) {
+                $('#systemQualityAlert').html(`
+                    <div class="alert alert-info py-2">
+                        <strong>系统提示：</strong>动作回测样本仍在积累中，当前待验证 ${response.data.pending_validation_count || 0} 条，请优先结合止损线和仓位控制使用建议。
+                        <div class="small mt-1 text-muted">动作回测评级 N/A · ${escapeHtml(backtest.recommendation || '系统正在积累验证样本')}</div>
+                    </div>
+                `).show();
+                return;
+            }
+
+            if (grade === 'A' || grade === 'B') {
+                $('#systemQualityAlert').hide().empty();
+                return;
+            }
+
+            const alertClass = grade === 'D' || status === 'risk' ? 'alert-warning' : 'alert-info';
+            const modelText = status === 'healthy' ? '模型状态健康' : (status === 'warning' ? '模型仍需观察' : '模型需继续优化');
+            const text = backtest.recommendation || '当前建议系统仍需继续优化，建议以轻仓和观察为主。';
+            $('#systemQualityAlert').html(`
+                <div class="alert ${alertClass} py-2">
+                    <strong>系统提示：</strong>${escapeHtml(text)}
+                    <div class="small mt-1 text-muted">动作回测评级 ${grade} · ${escapeHtml(modelText)}</div>
+                </div>
+            `).show();
+        }
+    });
+}
+
+function loadRecommendations() {
+    $('#loading').show();
+    $('#recommendationTable').hide();
+    $('#recommendationCards').hide();
+    const params = new URLSearchParams({
+        sort_by: currentSort,
+        order: currentOrder,
+        limit: '20'
+    });
+    if (currentKeyword) params.set('keyword', currentKeyword);
+
+    $.ajax({
+        url: `/api/recommendations/${currentType}?${params.toString()}`,
+        method: 'GET',
+        success: function(response) {
+            $('#loading').hide();
+            if (response.code === 200 && response.data && response.data.recommendations) {
+                const recs = response.data.recommendations;
+                const batchNote = response.data.as_of ? `<div class="small text-muted mb-2">推荐数据日期：${escapeHtml(response.data.as_of)}</div>` : '';
+                const frameworkSummary = renderStrategyFramework(response.data.strategy_framework || {});
+                const horizonSummary = renderHorizonTopPicks(response.data.horizon_top_picks || {});
+                const strengthSummary = renderStrengthSpotlight(response.data.strength_spotlight || []);
+                $('#advisorSummary').html(batchNote + strengthSummary + frameworkSummary + horizonSummary + renderPortfolioAdvice(response.data.portfolio_advice)).toggle(!!response.data.portfolio_advice || !!response.data.as_of || !!horizonSummary || !!frameworkSummary || !!strengthSummary);
+                if (recs.length > 0) {
+                    let html = '';
+                    let cardsHtml = '';
+                    for (const rec of recs) {
+                        const volClass = rec.volatility_level === 'low' ? 'badge-low' : (rec.volatility_level === 'medium' ? 'badge-medium' : 'badge-high');
+                        const volText = rec.volatility_level === 'low' ? '低' : (rec.volatility_level === 'medium' ? '中' : '高');
+                        const displayCode = rec.display_code || rec.code;
+                        const industry = rec.industry ? `<br><small class="text-muted">${escapeHtml(rec.industry)}</small>` : '';
+                        const actionMeta = getActionMeta(rec.advisor_action || rec.advisor_view?.action || 'watch');
+                        const riskMeta = getRiskMeta(rec.risk_level || rec.advisor_view?.risk_level || 'medium');
+                        const strengthMeta = getStrengthMeta(rec.strength || {});
+                        const reviewDays = rec.review_in_days || rec.advisor_view?.review_in_days || 3;
+                        html += `<tr>
+                            <td class="fw-bold">${rec.rank}</td>
+                            <td><strong>${escapeHtml(rec.name)}</strong><br><small class="text-muted">${displayCode}</small>${industry}</td>
+                            <td>${formatPrice(rec.current_price, currentType)}</td>
+                            <td class="${getProbabilityClass(rec.up_probability_5d)} fw-bold">${formatPercent(rec.up_probability_5d)}</td>
+                            <td class="${getProbabilityClass(rec.up_probability_20d)} fw-bold">${formatPercent(rec.up_probability_20d)}</td>
+                            <td class="${getProbabilityClass(rec.up_probability_60d)} fw-bold">${formatPercent(rec.up_probability_60d)}</td>
+                            <td><span class="text-primary-custom fw-bold">${formatNumber(rec.total_score, 2, '0.00')}</span></td>
+                            <td>
+                                <span class="${strengthMeta.className}">${strengthMeta.text}</span>
+                                <span class="${actionMeta.className}">${actionMeta.text}</span>
+                                <span class="${riskMeta.className}">${riskMeta.text}</span>
+                                <div class="small text-muted mt-1">${formatPositionAdvice(rec.position_size_pct || 0, true, rec.advisor_action || rec.advisor_view?.action || 'watch')} · ${reviewDays}天复查</div>
+                                <div class="small text-muted">${escapeHtml(formatHoldingText(rec))}</div>
+                            </td>
+                            <td><span class="${volClass}">${volText}</span></td>
+                            <td><button class="btn btn-sm btn-outline-primary" onclick="showDetail('${rec.code}', '${currentType}')"><i class="fas fa-chart-line"></i> 详情</button></td>
+                        </tr>`;
+
+                        cardsHtml += `<div class="rec-card">
+                            <div class="rec-head">
+                                <div>
+                                    <div class="rec-title">${rec.rank}. ${escapeHtml(rec.name)}</div>
+                                    <div class="rec-meta">${displayCode}${rec.industry ? ' · ' + escapeHtml(rec.industry) : ''}</div>
+                                </div>
+                                <button class="btn btn-sm btn-outline-primary" onclick="showDetail('${rec.code}', '${currentType}')">详情</button>
+                            </div>
+                            <div class="mt-2">
+                                <span class="${strengthMeta.className}">${strengthMeta.text}</span>
+                                <span class="${actionMeta.className}">${actionMeta.text}</span>
+                                <span class="${riskMeta.className}">${riskMeta.text}</span>
+                            </div>
+                            <div class="rec-grid">
+                                <div><div class="rec-k">当前价</div><div class="rec-v">${formatPrice(rec.current_price, currentType)}</div></div>
+                                <div><div class="rec-k">综合评分</div><div class="rec-v text-primary-custom">${formatNumber(rec.total_score, 2, '0.00')}</div></div>
+                                <div><div class="rec-k">5日概率</div><div class="rec-v ${getProbabilityClass(rec.up_probability_5d)}">${formatPercent(rec.up_probability_5d)}</div></div>
+                                <div><div class="rec-k">20日概率</div><div class="rec-v ${getProbabilityClass(rec.up_probability_20d)}">${formatPercent(rec.up_probability_20d)}</div></div>
+                                <div><div class="rec-k">60日概率</div><div class="rec-v ${getProbabilityClass(rec.up_probability_60d)}">${formatPercent(rec.up_probability_60d)}</div></div>
+                                <div><div class="rec-k">建议仓位</div><div class="rec-v">${formatPositionAdvice(rec.position_size_pct || 0, false, rec.advisor_action || rec.advisor_view?.action || 'watch')}</div></div>
+                            </div>
+                            <div class="small text-muted mt-2">${escapeHtml(formatHoldingText(rec))}</div>
+                        </div>`;
+                    }
+                    $('#recommendationList').html(html);
+                    $('#recommendationCards').html(cardsHtml);
+                    $('#recommendationTable').show();
+                    $('#recommendationCards').show();
+                } else {
+                    $('#recommendationTable').show();
+                    $('#recommendationList').html('<tr><td colspan="10" class="text-center py-4">暂无推荐数据</td></tr>');
+                    $('#recommendationCards').html('<div class="text-center text-muted py-4">暂无推荐数据</div>').show();
+                }
+            }
+        },
+        error: function() {
+            $('#loading').hide();
+            $('#recommendationTable').show();
+            $('#recommendationCards').show();
+            $('#advisorSummary').hide().empty();
+            $('#recommendationList').html('<tr><td colspan="10" class="text-center text-danger py-4">加载失败，请重试</td></tr>');
+            $('#recommendationCards').html('<div class="text-center text-danger py-4">加载失败，请重试</div>');
+        }
+    });
+}
+
+function showDetail(code, assetType = currentType) {
+    const modal = new bootstrap.Modal(document.getElementById('detailModal'));
+    $('#detailTitle').text(`详情 - ${code}`);
+    $('#detailContent').html('<div class="text-center py-4"><div class="loading"></div><p>加载中...</p></div>');
+    modal.show();
+    const query = assetType ? `?type=${encodeURIComponent(assetType)}` : '';
+    $.ajax({
+        url: `/api/recommendations/${code}/detail${query}`,
+        method: 'GET',
+        success: function(response) {
+            if (response.code === 200 && response.data) {
+                const data = response.data;
+                let predHtml = '';
+                if (data.predictions && data.predictions.length) {
+                    predHtml = '<div class="table-responsive mb-3"><table class="table table-sm table-bordered"><thead class="table-light"><tr><th>周期</th><th>上涨概率</th><th>目标价区间</th><th>止损价</th></tr></thead><tbody>';
+                    for (const p of data.predictions) {
+                        predHtml += `<tr><td><strong>${p.period || p.period_days}日</strong></td><td class="${p.up_probability >= 60 ? 'text-success' : (p.up_probability <= 40 ? 'text-danger' : 'text-warning')}">${formatPercent(p.up_probability, '0.00')}</td><td>${formatPrice(p.target_low, data.asset_type)} - ${formatPrice(p.target_high, data.asset_type)}</td><td>${formatPrice(p.stop_loss, data.asset_type)}</td></tr>`;
+                    }
+                    predHtml += '</tbody></table></div>';
+                }
+                let risksHtml = '';
+                if (data.analysis?.risk?.items) { for (const r of data.analysis.risk.items) risksHtml += `<li>${escapeHtml(r)}</li>`; }
+                const advisor = data.advisor || {};
+                const plan = data.execution_plan || {};
+                const actionMeta = getActionMeta(advisor.action || 'watch');
+                const riskMeta = getRiskMeta(advisor.risk_level || 'medium');
+                const reviewFocus = Array.isArray(advisor.review_focus) ? advisor.review_focus.map(item => `<span class="advisor-chip advisor-hold">${escapeHtml(getReviewFocusText(item))}</span>`).join('') : '';
+                const reasonTags = Array.isArray(advisor.reason_tags) ? advisor.reason_tags.map(item => `<span class="advisor-chip advisor-hold">${escapeHtml(getReasonTagText(item))}</span>`).join('') : '';
+                const rationaleSteps = Array.isArray(data.recommendation_rationale?.steps) ? data.recommendation_rationale.steps.map(item => `
+                    <div class="horizon-pick-card">
+                        <div class="fw-bold">${escapeHtml(item.title || '')}</div>
+                        <div class="small text-muted mt-2">${escapeHtml(item.summary || '')}</div>
+                    </div>
+                `).join('') : '';
+                const evidencePoints = Array.isArray(data.recommendation_rationale?.evidence_points) ? data.recommendation_rationale.evidence_points.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const qualityGate = data.quality_gate || data.recommendation_rationale?.quality_gate || {};
+                const qualityWarnings = Array.isArray(qualityGate.warnings) ? qualityGate.warnings.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const historicalValidation = data.historical_validation || {};
+                const historicalScope = historicalValidation.scope_label || '同类资产';
+                const historicalLine = historicalValidation.status === 'ok'
+                    ? `${escapeHtml(String(historicalScope))}历史验证：${escapeHtml(String(historicalValidation.preferred_horizon || '--'))}日窗口 · 命中率 ${formatPercent(historicalValidation.hit_rate, '--')} · Brier ${formatNumber(historicalValidation.brier, 3)} · 样本 ${escapeHtml(String(historicalValidation.samples || 0))}`
+                    : '';
+                const dataQuality = data.data_quality || {};
+                const dataWarnings = Array.isArray(dataQuality.warnings) ? dataQuality.warnings.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const provenanceItems = Array.isArray(dataQuality.provenance_items) ? dataQuality.provenance_items.map(item => `<li><strong>${escapeHtml(item.label || '')}</strong>：${escapeHtml(item.source || '')}</li>`).join('') : '';
+                const whyBuy = Array.isArray(plan.why_buy) ? plan.why_buy.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const actionSteps = Array.isArray(plan.action_steps) ? plan.action_steps.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const suitableFor = Array.isArray(plan.suitable_for) ? plan.suitable_for.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const avoidFor = Array.isArray(plan.avoid_for) ? plan.avoid_for.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const portfolioRole = Array.isArray(plan.portfolio_role) ? plan.portfolio_role.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const rebalanceTriggers = Array.isArray(plan.rebalance_triggers) ? plan.rebalance_triggers.map(item => `<li>${escapeHtml(item)}</li>`).join('') : '';
+                const rationaleTitle = ['reduce', 'sell'].includes(advisor.action) ? '⚠️ 为什么要谨慎' : '✅ 为什么可以考虑';
+                const positionPct = Number(advisor.position_size_pct || 0);
+                const positionText = formatPositionAdvice(positionPct, true, advisor.action || 'watch');
+                $('#detailContent').html(`
+                    <div class="mb-3"><h4>${escapeHtml(data.name)} (${escapeHtml(data.code)})</h4><p>当前价格: ${formatPrice(data.current_price, data.asset_type)} | 更新时间: ${data.update_time || '--'}</p></div>
+                    <div class="advisor-summary-card mb-3">
+                        <div class="d-flex flex-wrap gap-2 mb-2">
+                            <span class="${actionMeta.className}">${actionMeta.text}</span>
+                            <span class="${riskMeta.className}">${riskMeta.text}</span>
+                            <span class="advisor-chip advisor-hold">置信度 ${escapeHtml(getConfidenceText(advisor.confidence || 'low'))}</span>
+                            <span class="advisor-chip ${qualityGate.grade === 'A' ? 'advisor-buy' : (qualityGate.grade === 'B' ? 'advisor-add' : 'advisor-watch')}">证据等级 ${escapeHtml(qualityGate.grade || 'C')}</span>
+                            <span class="advisor-chip advisor-hold">${escapeHtml(positionText)}</span>
+                            <span class="advisor-chip advisor-hold">止损 ${(Number(advisor.stop_loss_pct || 0) * 100).toFixed(1)}%</span>
+                            <span class="advisor-chip advisor-hold">止盈 ${(Number(advisor.take_profit_pct || 0) * 100).toFixed(1)}%</span>
+                            <span class="advisor-chip advisor-hold">${advisor.review_in_days || 3}天复查</span>
+                            <span class="advisor-chip advisor-hold">${escapeHtml(data.suggested_period || '10-40个交易日')}</span>
+                        </div>
+                        <div class="rec-summary fw-bold">${escapeHtml(plan.headline || advisor.summary || '暂无投顾摘要')}</div>
+                        <div class="rec-summary mt-2">${escapeHtml(advisor.summary || '暂无投顾摘要')}</div>
+                        <div class="small text-muted mt-2">${escapeHtml(plan.position_note || '')}</div>
+                        <div class="small text-muted mt-2">证据分：${formatNumber(advisor.evidence_score, 1, '50.0')} / 模型可靠性：${escapeHtml(getReliabilityText(advisor.model_reliability?.label || advisor.model_reliability?.level || 'stable'))}</div>
+                        <div class="mt-2">${reasonTags}</div>
+                        <div class="mt-2">${reviewFocus}</div>
+                    </div>
+                    ${(qualityGate.summary || data.recommendation_rationale?.model_summary || evidencePoints || historicalLine) ? `
+                    <div class="advisor-summary-card mb-3">
+                        <div class="fw-bold mb-2">🛡️ 建议可信度闸门</div>
+                        <div class="small mb-2">${escapeHtml(qualityGate.confidence_label || '中性观察')} · ${escapeHtml(qualityGate.summary || '')}</div>
+                        <div class="small text-muted mb-2">多周期一致性：${escapeHtml(qualityGate.agreement_label || '待确认')} · ${escapeHtml(qualityGate.next_step || '')}</div>
+                        ${historicalLine ? `<div class="small text-muted mb-2">${historicalLine}</div>` : ''}
+                        ${(!historicalLine && qualityGate.historical_summary) ? `<div class="small text-muted mb-2">${escapeHtml(qualityGate.historical_summary)}</div>` : ''}
+                        <ul class="small text-muted mb-0">${qualityWarnings || '<li>当前暂无额外风险提示</li>'}</ul>
+                    </div>` : ''}
+                    ${(dataQuality.freshness_text || dataWarnings || provenanceItems) ? `
+                    <div class="advisor-summary-card mb-3">
+                        <div class="fw-bold mb-2">🧪 数据质量说明</div>
+                        <div class="small mb-2">${escapeHtml(dataQuality.freshness_text || '数据状态未知')} · 完整度 ${escapeHtml(String(dataQuality.completeness_pct ?? '--'))}%</div>
+                        <div class="small text-muted mb-2">${escapeHtml(dataQuality.source_text || '数据来源未标注')}</div>
+                        ${provenanceItems ? `<ul class="small text-muted mb-2">${provenanceItems}</ul>` : ''}
+                        <ul class="small text-muted mb-0">${dataWarnings || '<li>当前数据完整度正常</li>'}</ul>
+                    </div>` : ''}
+                    ${(data.recommendation_rationale?.model_summary || evidencePoints) ? `
+                    <div class="advisor-summary-card mb-3">
+                        <div class="fw-bold mb-2">🤖 模型依据说明</div>
+                        <div class="text-muted small mb-2">${escapeHtml(data.recommendation_rationale?.model_summary || '本结论由训练模型与实时数据共同生成。')}</div>
+                        <ul class="small text-muted mb-2">${evidencePoints || '<li>当前暂无可展示的模型证据</li>'}</ul>
+                        <div class="small ${Number(advisor.evidence_score || 50) < 60 ? 'text-warning' : 'text-success'}">${escapeHtml(data.recommendation_rationale?.honesty_note || '')}</div>
+                    </div>` : ''}
+                    ${rationaleSteps ? `
+                    <div class="advisor-summary-card mb-3">
+                        <div class="fw-bold mb-2">🧾 为什么推荐这个资产</div>
+                        <div class="text-muted small mb-3">系统会先看大方向，再看行业匹配，最后给出具体执行建议。</div>
+                        <div class="strategy-framework-grid">${rationaleSteps}</div>
+                    </div>` : ''}
+                    <div class="row mb-3">
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6>${rationaleTitle}</h6><ul class="small text-muted mb-0">${whyBuy || '<li>暂无明确加分项</li>'}</ul></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6>🛠️ 怎么执行更稳妥</h6><ul class="small text-muted mb-0">${actionSteps || '<li>先观察，等待更明确信号</li>'}</ul></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6>👤 更适合谁</h6><ul class="small text-muted mb-0">${suitableFor || '<li>适合能接受波动的投资者</li>'}</ul></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6>⛔ 不适合谁</h6><ul class="small text-muted mb-0">${avoidFor || '<li>不适合追求短期确定性收益的人群</li>'}</ul></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6>🧩 在组合中的角色</h6><ul class="small text-muted mb-0">${portfolioRole || '<li>当前更适合做辅助观察仓位</li>'}</ul></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6>🔁 什么情况下调仓</h6><ul class="small text-muted mb-0">${rebalanceTriggers || '<li>若趋势转弱或触发风控线，应分批调整仓位</li>'}</ul></div></div></div>
+                    </div>
+                    <h5>📈 预测数据</h5>${predHtml || '<div class="alert alert-info">暂无预测数据</div>'}
+                    <h5>📊 五维分析</h5><div class="row mb-3">
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6 class="text-primary-custom">技术面 (${formatNumber(data.analysis?.technical?.score, 2)}/5)</h6><p class="small text-muted">${escapeHtml(data.analysis?.technical?.details || '暂无数据')}</p></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6 class="text-primary-custom">估值面 (${formatNumber(data.analysis?.valuation?.score, 2)}/5)</h6><p class="small text-muted">${escapeHtml(data.analysis?.valuation?.details || '暂无数据')}</p></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6 class="text-primary-custom">资金面 (${formatNumber(data.analysis?.money_flow?.score, 2)}/5)</h6><p class="small text-muted">${escapeHtml(data.analysis?.money_flow?.details || '暂无数据')}</p></div></div></div>
+                        <div class="col-md-6 mb-2"><div class="card bg-light"><div class="card-body"><h6 class="text-primary-custom">消息面 (${formatNumber(data.analysis?.news?.score, 2)}/5)</h6><p class="small text-muted">${escapeHtml(data.analysis?.news?.details || '暂无数据')}</p></div></div></div>
+                    </div>
+                    <h5>⚠️ 风险提示</h5><ul class="text-muted">${risksHtml || '<li>暂无风险提示</li>'}</ul>
+                    <div class="alert alert-info mt-3"><strong>综合评分: ${formatNumber(data.total_score, 2)}/5</strong><br>建议仓位: ${data.suggested_position || '不超过总资金5%'}<br>建议周期: ${data.suggested_period || '1-3个月'}</div>
+                `);
+            } else { $('#detailContent').html('<div class="alert alert-danger">加载详情失败</div>'); }
+        },
+        error: function() { $('#detailContent').html('<div class="alert alert-danger">网络错误，请重试</div>'); }
+    });
+}
+
+function refreshRecommendations() {
+    $('#refreshBtn').html('<i class="fas fa-spinner fa-spin"></i> 刷新中...').prop('disabled', true);
+    $.ajax({
+        url: '/api/recommendations/refresh',
+        method: 'POST',
+        success: function(response) {
+            if (response.code === 200) { loadRecommendations(); showToast('推荐数据已刷新', 'success'); }
+            else { showToast('刷新失败: ' + (response.message || '未知错误'), 'error'); }
+            $('#refreshBtn').html('<i class="fas fa-sync-alt"></i> 刷新推荐').prop('disabled', false);
+        },
+        error: function() { $('#refreshBtn').html('<i class="fas fa-sync-alt"></i> 刷新推荐').prop('disabled', false); showToast('刷新失败，请重试', 'error'); }
+    });
+}
+
+function syncPageStateToUrl() {
+    const params = new URLSearchParams(window.location.search);
+    params.set('type', currentType);
+    if (currentKeyword) params.set('keyword', currentKeyword);
+    else params.delete('keyword');
+    const query = params.toString();
+    history.replaceState({}, '', `${window.location.pathname}${query ? '?' + query : ''}`);
+}
+
+$(document).ready(function() {
+    const initialParams = new URLSearchParams(window.location.search);
+    const initialType = initialParams.get('type');
+    const initialKeyword = (initialParams.get('keyword') || '').trim();
+    const supportedTypes = ['a_stock', 'hk_stock', 'us_stock', 'active_fund', 'etf', 'gold', 'silver'];
+    if (supportedTypes.includes(initialType)) {
+        currentType = initialType;
+        $('#recommendationTabs button').removeClass('active');
+        $(`#recommendationTabs button[data-type="${currentType}"]`).addClass('active');
+    }
+    if (initialKeyword) {
+        currentKeyword = initialKeyword;
+        $('#searchKeyword').val(initialKeyword);
+    }
+
+    loadSystemQualityAlert();
+    syncPageStateToUrl();
+    loadRecommendations();
+    $('#recommendationTabs button').on('click', function() {
+        $('#recommendationTabs button').removeClass('active');
+        $(this).addClass('active');
+        currentType = $(this).data('type');
+        syncPageStateToUrl();
+        loadRecommendations();
+    });
+    $('[data-sort]').on('click', function() {
+        const sort = $(this).data('sort');
+        if (currentSort === sort) currentOrder = currentOrder === 'desc' ? 'asc' : 'desc';
+        else { currentSort = sort; currentOrder = 'desc'; }
+        loadRecommendations();
+    });
+    $('#refreshBtn').on('click', refreshRecommendations);
+
+    const triggerSearch = () => {
+        currentKeyword = ($('#searchKeyword').val() || '').trim();
+        syncPageStateToUrl();
+        loadRecommendations();
+    };
+
+    $('#searchKeyword').on('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            if (searchDebounceTimer) {
+                clearTimeout(searchDebounceTimer);
+                searchDebounceTimer = null;
+            }
+            triggerSearch();
+        }
+    });
+
+    $('#searchKeyword').on('input', function() {
+        currentKeyword = ($(this).val() || '').trim();
+        if (searchDebounceTimer) {
+            clearTimeout(searchDebounceTimer);
+        }
+        searchDebounceTimer = setTimeout(() => {
+            syncPageStateToUrl();
+            loadRecommendations();
+        }, 300);
+    });
+
+    $('#clearSearchBtn').on('click', function() {
+        $('#searchKeyword').val('');
+        currentKeyword = '';
+        syncPageStateToUrl();
+        loadRecommendations();
+    });
+});
+</script>
+{% endblock %}

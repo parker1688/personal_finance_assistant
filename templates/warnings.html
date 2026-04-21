@@ -1,0 +1,367 @@
+{% extends "base.html" %}
+
+{% block title %}风险预警 - 个人AI理财助手{% endblock %}
+{% block page_title %}风险预警{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row mb-4">
+        <div class="col-md-4 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="currentWarningCount">--</div><div class="stat-label">当前预警</div></div></div>
+        <div class="col-md-4 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="todayNewCount">--</div><div class="stat-label">今日新增</div></div></div>
+        <div class="col-md-4 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="totalWarningCount">--</div><div class="stat-label">历史累计</div></div></div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="fas fa-user-shield"></i> 预警处置中心</span>
+            <div>
+                <button class="btn btn-sm btn-custom" id="scanWarningsBtn"><i class="fas fa-rotate"></i> 立即扫描</button>
+                <a href="/holdings" class="btn btn-sm btn-outline-secondary ms-2">查看持仓</a>
+            </div>
+        </div>
+        <div class="card-body" id="warningActionCenter"><div class="text-muted small">加载中...</div></div>
+    </div>
+    
+    <div class="card mb-4"><div class="card-header"><i class="fas fa-bell"></i> 当前预警</div><div class="card-body"><div id="currentWarnings"><div class="text-center py-4"><div class="loading"></div><p>加载中...</p></div></div></div></div>
+    
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-route"></i> 持仓未来路径与命中回放</div>
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                <div>
+                    <div class="fw-bold"><i class="fas fa-route"></i> 当前持仓未来路径</div>
+                    <div class="small text-muted">上方只看预警热度；真正用于判断的是这里的 5日 / 20日 / 60日 持仓路径和下方命中回放</div>
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    <select id="holdingSelector" class="form-select form-select-sm" style="width:240px;"><option value="">加载中...</option></select>
+                    <select id="holdingTrendModel" class="form-select form-select-sm" style="width:120px;">
+                        <option value="5d" selected>5日模型</option>
+                        <option value="20d">20日模型</option>
+                        <option value="60d">60日模型</option>
+                    </select>
+                </div>
+            </div>
+            <div id="futurePathChart" style="height:360px;"></div>
+            <div id="futurePathSummary" class="small text-muted mt-3">加载中...</div>
+            <div class="mt-4">
+                <div class="fw-bold mb-2"><i class="fas fa-history"></i> 历史命中回放</div>
+                <div id="historyReplaySummary" class="small text-muted mb-2">加载中...</div>
+                <div class="table-responsive">
+                    <table class="table table-sm table-striped align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>预测日</th>
+                                <th>到期日</th>
+                                <th>预测方向</th>
+                                <th>实际结果</th>
+                                <th>状态</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyReplayRows">
+                            <tr><td colspan="5" class="text-center text-muted">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header"><i class="fas fa-history"></i> 历史预警记录<div class="float-end"><select id="warningTypeFilter" class="form-select form-select-sm" style="width:120px;"><option value="">全部类型</option><option value="技术超买">技术超买</option><option value="技术超卖">技术超卖</option><option value="MACD死叉">MACD死叉</option><option value="主力流出">主力流出</option><option value="负面新闻">负面新闻</option><option value="估值偏高">估值偏高</option><option value="大幅下跌">大幅下跌</option></select></div></div>
+        <div class="card-body">
+            <div class="table-responsive"><table class="table-custom"><thead><tr><th>时间</th><th>标的</th><th>预警类型</th><th>内容</th><th>建议动作</th><th>级别</th><th>状态</th></tr></thead><tbody id="historyWarningList"><tr><td colspan="7" class="text-center">加载中...</td></tr></tbody></table></div>
+            <div class="mt-3 text-center"><ul class="pagination justify-content-center" id="pagination"></ul></div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentPage = 1, currentType = '', futurePathChart = null;
+let latestTrendPayload = null, currentHoldingCode = '', currentHoldingModel = '5d';
+
+function loadStats() {
+    $.ajax({ url: '/api/warnings/stats', method: 'GET', success: function(r) { if (r.code===200 && r.data) { $('#currentWarningCount').text(r.data.current_count||0); $('#todayNewCount').text(r.data.today_new||0); $('#totalWarningCount').text(r.data.total_count||0); } } });
+}
+
+function loadCurrentWarnings() {
+    $.ajax({ url: '/api/warnings/current', method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) {
+            const warnings = r.data.warnings || [];
+            const riskText = r.data.risk_status === 'high' ? '高风险' : (r.data.risk_status === 'medium' ? '中风险' : '低风险');
+            const riskClass = r.data.risk_status === 'high' ? 'alert-danger' : (r.data.risk_status === 'medium' ? 'alert-warning' : 'alert-success');
+            const nextActions = Array.isArray(r.data.next_actions) ? r.data.next_actions : [];
+            $('#warningActionCenter').html(`
+                <div class="alert ${riskClass} mb-0">
+                    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                        <div>
+                            <div><strong>当前处置等级：</strong>${riskText}</div>
+                            <div class="small mt-1">${escapeHtml(r.data.advisor_summary || '暂无处置建议')}</div>
+                            <ul class="small mt-2 mb-0 ps-3">${nextActions.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+                        </div>
+                        <div class="small text-end text-muted">
+                            <div>高风险 ${r.data.high || 0} 条</div>
+                            <div>中风险 ${r.data.medium || 0} 条</div>
+                            <div>涉及持仓 ${r.data.related_holdings_count || 0} 条</div>
+                        </div>
+                    </div>
+                </div>
+            `);
+
+            if (warnings.length) {
+                let html = '';
+                for (const w of warnings) {
+                    const levelClass = w.level === 'high' ? 'alert-danger' : 'alert-warning';
+                    const levelText = w.level === 'high' ? '高风险' : '中风险';
+                    const relatedTag = w.related_to_holding ? '<span class="badge bg-dark ms-2">持仓相关</span>' : '<span class="badge bg-secondary ms-2">观察池</span>';
+                    const jumpUrl = `/recommendations?keyword=${encodeURIComponent(w.code || '')}`;
+                    html += `<div class="alert ${levelClass} mb-2">
+                        <div class="d-flex justify-content-between flex-wrap gap-2">
+                            <div><strong>${escapeHtml(w.name)} (${w.code})</strong><span class="badge-${w.level === 'high' ? 'high' : 'medium'} ms-2">${levelText}</span>${relatedTag}</div>
+                            <small>${w.time}</small>
+                        </div>
+                        <div class="mt-1">${escapeHtml(w.message)}</div>
+                        <div class="mt-1 small text-muted">建议: ${escapeHtml(w.suggestion || '关注')}</div>
+                        <div class="mt-1 small"><strong>动作:</strong> ${escapeHtml(w.action_label || '观察')} · 建议 ${w.review_in_hours || 24} 小时内复核</div>
+                        <div class="mt-2">
+                            <a class="btn btn-sm btn-outline-primary" href="${jumpUrl}">查看推荐</a>
+                            <a class="btn btn-sm btn-outline-secondary ms-2" href="/holdings">查看持仓</a>
+                        </div>
+                    </div>`;
+                }
+                $('#currentWarnings').html(html);
+            } else {
+                $('#currentWarnings').html('<div class="alert alert-success">暂无预警，一切正常！</div>');
+            }
+        }
+    }, error: function() { $('#warningActionCenter').html('<div class="alert alert-danger mb-0">处置建议加载失败</div>'); $('#currentWarnings').html('<div class="alert alert-danger">加载失败</div>'); } });
+}
+
+function loadHistoryWarnings() {
+    let url = `/api/warnings/history?page=${currentPage}&size=20`;
+    if (currentType) url += `&type=${encodeURIComponent(currentType)}`;
+    $.ajax({ url: url, method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) {
+            const items = r.data.items || [];
+            if (items.length) {
+                let html = '';
+                for (const w of items) {
+                    const levelClass = w.level === 'high' ? 'badge-high' : 'badge-medium';
+                    const levelText = w.level === 'high' ? '高风险' : '中风险';
+                    html += `<tr>
+                        <td style="white-space:nowrap">${w.date} ${w.time||''}</td>
+                        <td><strong>${escapeHtml(w.name)}</strong><br><small>${w.code}</small></td>
+                        <td>${w.type}</td>
+                        <td>${escapeHtml(w.message)}</td>
+                        <td>${escapeHtml(w.action_label || w.suggestion || '观察')}</td>
+                        <td><span class="${levelClass}">${levelText}</span></td>
+                        <td>${w.is_sent ? '已推送' : '待推送'}</td>
+                    </tr>`;
+                }
+                $('#historyWarningList').html(html);
+                updatePagination(r.data.total, r.data.page, r.data.size);
+            } else { $('#historyWarningList').html('<tr><td colspan="7" class="text-center">暂无历史预警记录</td></tr>'); }
+        }
+    }, error: function() { $('#historyWarningList').html('<tr><td colspan="7" class="text-center text-danger">加载失败</td></tr>'); } });
+}
+
+function getHoldingSeries(payload, modelKey, code) {
+    const series = (payload && payload.holding_paths && Array.isArray(payload.holding_paths[modelKey]))
+        ? payload.holding_paths[modelKey]
+        : [];
+    if (!series.length) return null;
+    return series.find(item => item.code === code) || series[0];
+}
+
+function getHoldingReplay(payload, modelKey, code) {
+    const series = (payload && payload.holding_replays && Array.isArray(payload.holding_replays[modelKey]))
+        ? payload.holding_replays[modelKey]
+        : [];
+    if (!series.length) return null;
+    return series.find(item => item.code === code) || series[0];
+}
+
+function renderHoldingReplay(payload) {
+    const replayBlock = getHoldingReplay(payload, currentHoldingModel, currentHoldingCode);
+    if (!replayBlock || !Array.isArray(replayBlock.replay) || !replayBlock.replay.length) {
+        $('#historyReplaySummary').text('暂无历史命中记录，当前更多是待验证样本。');
+        $('#historyReplayRows').html('<tr><td colspan="5" class="text-center text-muted">暂无历史记录</td></tr>');
+        return;
+    }
+
+    $('#historyReplaySummary').html(
+        `<strong>${escapeHtml(replayBlock.name)} (${escapeHtml(replayBlock.code)})</strong> 最近 ${replayBlock.replay.length} 次 ${escapeHtml(currentHoldingModel.replace('d', ''))}日预测：`
+        + `命中 ${replayBlock.hit_count || 0} 次，偏差 ${replayBlock.miss_count || 0} 次，待验证 ${replayBlock.pending_count || 0} 次。`
+    );
+
+    const rowsHtml = replayBlock.replay.map(item => {
+        const statusBadge = item.status === 'reviewed'
+            ? (item.is_direction_correct ? '<span class="badge bg-success">命中</span>' : '<span class="badge bg-danger">偏差</span>')
+            : '<span class="badge bg-secondary">待验证</span>';
+        const actualText = item.actual_return === null || item.actual_return === undefined
+            ? '待验证'
+            : `${escapeHtml(item.actual_direction_text || '已复盘')} (${item.actual_return}%)`;
+        return `<tr>
+            <td>${escapeHtml(item.prediction_date || '-')}</td>
+            <td>${escapeHtml(item.expiry_date || '-')}</td>
+            <td>${escapeHtml(item.predicted_direction_text || '无预测')} · ${item.predicted_up_probability || 0}%</td>
+            <td>${actualText}</td>
+            <td>${statusBadge}</td>
+        </tr>`;
+    }).join('');
+    $('#historyReplayRows').html(rowsHtml);
+}
+
+function renderHoldingPathChart(payload) {
+    const holdingOptions = Array.isArray(payload.holding_options) ? payload.holding_options : [];
+    const $selector = $('#holdingSelector');
+
+    if (!$selector.children().length || $selector.children().first().val() === '') {
+        const optionsHtml = holdingOptions.length
+            ? holdingOptions.map(item => `<option value="${escapeHtml(item.code)}">${escapeHtml(item.name)} (${escapeHtml(item.code)})</option>`).join('')
+            : '<option value="">暂无持仓</option>';
+        $selector.html(optionsHtml);
+    }
+
+    if (!holdingOptions.some(item => item.code === currentHoldingCode)) {
+        currentHoldingCode = holdingOptions.length ? holdingOptions[0].code : '';
+    }
+    $selector.val(currentHoldingCode);
+    $('#holdingTrendModel').val(currentHoldingModel);
+
+    const selected = getHoldingSeries(payload, currentHoldingModel, currentHoldingCode);
+    if (!selected || !Array.isArray(selected.path) || !selected.path.length) {
+        $('#futurePathSummary').text('暂无可展示的持仓未来路径');
+        if (futurePathChart) {
+            futurePathChart.dispose();
+            futurePathChart = null;
+        }
+        renderHoldingReplay(payload);
+        return;
+    }
+
+    currentHoldingCode = selected.code;
+    const lineColor = selected.direction === 'bullish' || selected.direction === 'slightly_bullish' ? '#2ecc71'
+        : (selected.direction === 'bearish' || selected.direction === 'slightly_bearish' ? '#ff6b6b' : '#f7b731');
+
+    if (futurePathChart) futurePathChart.dispose();
+    futurePathChart = echarts.init(document.getElementById('futurePathChart'));
+    futurePathChart.setOption({
+        tooltip: {
+            trigger: 'axis',
+            formatter: function(params) {
+                if (!params || !params.length) return '';
+                const meta = (params[0] && params[0].data && params[0].data.meta) ? params[0].data.meta : {};
+                return `${meta.date || params[0].axisValue}<br/>`
+                    + `方向：${meta.direction_text || '震荡'}<br/>`
+                    + `预期价位：${meta.price || '-'}<br/>`
+                    + `日变化：${meta.pct_change || 0}%<br/>`
+                    + `置信度：${meta.confidence || '-'}%`;
+            }
+        },
+        legend: { data: ['预测路径'] },
+        xAxis: {
+            type: 'category',
+            data: selected.path.map(item => item.date.slice(5)),
+            axisLabel: { rotate: 45 }
+        },
+        yAxis: [
+            {
+                type: 'value',
+                name: '预期价位',
+                scale: true
+            }
+        ],
+        series: [
+            {
+                name: '预测路径',
+                type: 'line',
+                smooth: true,
+                symbolSize: 7,
+                lineStyle: { color: lineColor, width: 3 },
+                itemStyle: { color: lineColor },
+                areaStyle: { color: lineColor, opacity: 0.12 },
+                markLine: {
+                    symbol: 'none',
+                    lineStyle: { type: 'dashed', color: '#999' },
+                    label: { color: '#666' },
+                    data: [
+                        { yAxis: selected.current_price, name: '当前' },
+                        { yAxis: selected.target_low, name: '目标低位' },
+                        { yAxis: selected.target_high, name: '目标高位' }
+                    ]
+                },
+                data: selected.path.map(item => ({
+                    value: item.price,
+                    meta: item,
+                    itemStyle: {
+                        color: item.direction === 'up' ? '#2ecc71' : (item.direction === 'down' ? '#ff6b6b' : '#f7b731')
+                    }
+                }))
+            }
+        ]
+    });
+
+    $('#futurePathSummary').html(
+        `<strong>${escapeHtml(selected.name)} (${escapeHtml(selected.code)})</strong> 使用 <strong>${escapeHtml(currentHoldingModel.replace('d', ''))}日模型</strong> 推演未来 ${selected.path.length} 个交易日：`
+        + `${escapeHtml(selected.direction_text || '震荡')}，上涨概率 ${selected.up_probability || 0}% ，`
+        + `目标区间 ${selected.target_low || '-'} ~ ${selected.target_high || '-'}。`
+        + `<div class="mt-1">看涨 ${selected.up_days || 0} 天 / 震荡 ${selected.flat_days || 0} 天 / 承压 ${selected.down_days || 0} 天。</div>`
+    );
+    renderHoldingReplay(payload);
+}
+
+function loadTrendChart() {
+    $.ajax({ url: '/api/warnings/trend?days=30', method: 'GET', success: function(r) {
+        if (!(r.code===200 && r.data)) return;
+
+        const payload = Array.isArray(r.data)
+            ? { holding_paths: {}, holding_options: [], holding_replays: {} }
+            : r.data;
+
+        latestTrendPayload = payload;
+        renderHoldingPathChart(payload);
+    } });
+}
+
+function updatePagination(total, page, size) {
+    const totalPages = Math.ceil(total / size);
+    if (totalPages <= 1) { $('#pagination').empty(); return; }
+    let html = `<li class="page-item ${page<=1?'disabled':''}"><a class="page-link" href="#" data-page="${page-1}">上一页</a></li>`;
+    for (let i=Math.max(1,page-4); i<=Math.min(totalPages,page+5); i++) html += `<li class="page-item ${i===page?'active':''}"><a class="page-link" href="#" data-page="${i}">${i}</a></li>`;
+    html += `<li class="page-item ${page>=totalPages?'disabled':''}"><a class="page-link" href="#" data-page="${page+1}">下一页</a></li>`;
+    $('#pagination').html(html);
+    $('.page-link').off('click').on('click', function(e) { e.preventDefault(); const np = $(this).data('page'); if (np && np !== currentPage) { currentPage = np; loadHistoryWarnings(); } });
+}
+
+$(document).ready(function() {
+    loadStats(); loadCurrentWarnings(); loadHistoryWarnings(); loadTrendChart();
+    $('#warningTypeFilter').on('change', function() { currentType = $(this).val(); currentPage = 1; loadHistoryWarnings(); });
+    $('#holdingSelector').on('change', function() { currentHoldingCode = $(this).val() || ''; if (latestTrendPayload) renderHoldingPathChart(latestTrendPayload); });
+    $('#holdingTrendModel').on('change', function() { currentHoldingModel = $(this).val() || '60d'; if (latestTrendPayload) renderHoldingPathChart(latestTrendPayload); });
+    $('#scanWarningsBtn').on('click', function() {
+        const $btn = $(this);
+        $btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> 扫描中');
+        $.ajax({
+            url: '/api/warnings/scan',
+            method: 'POST',
+            success: function(r) {
+                if (r.code === 200) {
+                    showToast(r.message || '扫描完成', 'success');
+                    loadStats(); loadCurrentWarnings(); loadHistoryWarnings(); loadTrendChart();
+                } else {
+                    showToast(r.message || '扫描失败', 'error');
+                }
+            },
+            error: function() { showToast('扫描失败', 'error'); },
+            complete: function() { $btn.prop('disabled', false).html('<i class="fas fa-rotate"></i> 立即扫描'); }
+        });
+    });
+    setInterval(() => { loadStats(); loadCurrentWarnings(); if (document.hasFocus()) loadTrendChart(); }, 30000);
+    $(window).resize(function() { if (futurePathChart) futurePathChart.resize(); });
+});
+</script>
+{% endblock %}

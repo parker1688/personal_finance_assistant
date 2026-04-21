@@ -1,0 +1,19 @@
+# 数据库文件
+data/database/*.db
+data/database/*.db-wal
+data/database/*.db-shm
+
+# CSV 数据文件
+data/*.csv
+
+# 模型文件
+data/models/*.pkl
+data/models/*.json
+
+# 日志
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc

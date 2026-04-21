@@ -1,0 +1,92 @@
+{
+  "updated_at": "2026-04-21T11:29:28.169617",
+  "last_review": {
+    "time": "2026-04-21T11:29:28.169228",
+    "reviewed_count": 0,
+    "status": "checked",
+    "message": "训练完成后已检查复盘，当前无到期预测",
+    "seeded_count": 0
+  },
+  "last_reflection": {
+    "time": "2026-04-21T09:39:31.155228",
+    "has_adjustments": true,
+    "adjustments_count": 2,
+    "retrain_targets": [
+      {
+        "period": 5,
+        "asset": "all"
+      },
+      {
+        "period": "all",
+        "asset": "hk_stock"
+      },
+      {
+        "period": "all",
+        "asset": "a_stock"
+      },
+      {
+        "period": "all",
+        "asset": "us_stock"
+      },
+      {
+        "period": "all",
+        "asset": "silver"
+      },
+      {
+        "period": "all",
+        "asset": "etf"
+      }
+    ],
+    "status": "success",
+    "message": "已完成训练后反思，识别 6 个重训目标",
+    "auto_request": {
+      "enabled": true,
+      "only_assets": [
+        "hk_stock",
+        "a_stock",
+        "us_stock"
+      ],
+      "periods": [
+        5
+      ],
+      "summary": "资产=hk_stock、a_stock、us_stock；周期=5日"
+    }
+  },
+  "last_retrain": {
+    "time": "2026-04-21T09:39:31.155915",
+    "status": "success",
+    "periods": [
+      5
+    ],
+    "results": [
+      {
+        "asset_type": "a_stock",
+        "label": "A股（5日）",
+        "script": "train_a_stock.py",
+        "status": "success",
+        "returncode": 0
+      },
+      {
+        "asset_type": "hk_stock",
+        "label": "港股（5日）",
+        "script": "train_hk_stock.py",
+        "status": "success",
+        "returncode": 0
+      },
+      {
+        "asset_type": "us_stock",
+        "label": "美股（5日）",
+        "script": "train_us_stock.py",
+        "status": "success",
+        "returncode": 0
+      }
+    ],
+    "error": null,
+    "assets": [
+      "hk_stock",
+      "a_stock",
+      "us_stock"
+    ],
+    "message": "已根据反思结果自动执行一轮定向优化"
+  }
+}

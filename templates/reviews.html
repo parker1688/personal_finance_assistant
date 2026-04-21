@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+
+{% block title %}复盘分析 - 个人AI理财助手{% endblock %}
+{% block page_title %}复盘分析{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row mb-2">
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="overallAccuracy">--%</div><div class="stat-label">整体准确率</div></div></div>
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="accuracy5d">--%</div><div class="stat-label">5日预测准确率</div></div></div>
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="accuracy20d">--%</div><div class="stat-label">20日预测准确率</div></div></div>
+        <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="accuracy60d">--%</div><div class="stat-label">60日预测准确率</div></div></div>
+    </div>
+    <div class="alert alert-light border small mb-4" id="accuracyDataNote">准确率将仅基于当前持仓的真实已验证样本展示。</div>
+    
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-bullseye"></i> 操作建议回测<div class="float-end"><button type="button" class="btn btn-outline-primary btn-sm" id="syncReviewsBtn"><i class="fas fa-rotate"></i> 立即同步复盘</button></div></div>
+        <div class="card-body">
+            <div class="row mb-3">
+                <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="actionOverallAccuracy">--%</div><div class="stat-label">动作综合准确率</div></div></div>
+                <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="takeProfitHitRate">--%</div><div class="stat-label">止盈达成率</div></div></div>
+                <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="addSignalRate">--%</div><div class="stat-label">加仓盈利率</div></div></div>
+                <div class="col-md-3 col-sm-6 mb-3"><div class="stat-card"><div class="stat-value" id="actionOverallGrade">--</div><div class="stat-label">动作质量评级</div></div></div>
+            </div>
+            <div id="actionBacktestSummary" class="small text-muted">加载中...</div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-6"><div class="card"><div class="card-header"><i class="fas fa-chart-bar"></i> 按品类准确率</div><div class="card-body"><div id="byAssetChart" style="height:300px;"></div></div></div></div>
+        <div class="col-md-6"><div class="card"><div class="card-header"><i class="fas fa-chart-bar"></i> 按置信度准确率</div><div class="card-body"><div id="byConfidenceChart" style="height:300px;"></div></div></div></div>
+    </div>
+    
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-chart-line"></i> 准确率趋势<div class="float-end"><select id="trendPeriod" class="form-select form-select-sm" style="width:100px;"><option value="7">最近7天</option><option value="30" selected>最近30天</option><option value="90">最近90天</option></select></div></div>
+        <div class="card-body"><div id="accuracyTrendChart" style="height:300px;"></div></div>
+    </div>
+    
+    <div class="card mb-4">
+        <div class="card-header"><i class="fas fa-file-alt"></i> 复盘报告<div class="float-end"><div class="btn-group btn-group-sm"><button type="button" class="btn btn-outline-primary" id="weeklyReportBtn">本周周报</button><button type="button" class="btn btn-outline-primary" id="monthlyReportBtn">本月月报</button></div></div></div>
+        <div class="card-body"><div id="reportContent" class="p-3 bg-light rounded"><div class="text-center py-4"><div class="loading"></div><p>加载报告...</p></div></div></div>
+    </div>
+    
+    <div class="card"><div class="card-header"><i class="fas fa-history"></i> 最近复盘记录</div><div class="card-body"><div class="table-responsive"><table class="table-custom"><thead><tr><th>到期日</th><th>标的</th><th>预测周期</th><th>预测方向</th><th>实际方向</th><th>是否准确</th><th>误差分析</th></tr></thead><tbody id="recentReviewsList"><tr><td colspan="7" class="text-center">加载中...</td></tr></tbody></table></div></div></div>
+</div>
+
+<script>
+let byAssetChart = null, byConfidenceChart = null, accuracyTrendChart = null;
+let currentReportType = 'weekly';
+
+function runReviewSync() {
+    const $btn = $('#syncReviewsBtn');
+    $btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> 同步中');
+    $.ajax({
+        url: '/api/reviews/sync',
+        method: 'POST',
+        success: function(r) {
+            if (r.code === 200 && r.data) {
+                const msg = `${r.data.message}，当前待处理 ${r.data.due_now_count || 0} 条，到待验证 ${r.data.pending_validation_count || 0} 条。`;
+                $('#actionBacktestSummary').html(`<span class="text-success">${escapeHtml(msg)}</span>`);
+                loadAccuracyStats();
+                loadAccuracyTrend();
+                loadRecentReviews();
+                loadBacktestReport();
+            }
+        },
+        error: function(xhr) {
+            const msg = xhr.responseJSON?.message || '手动同步复盘失败';
+            $('#actionBacktestSummary').html(`<span class="text-danger">${escapeHtml(msg)}</span>`);
+        },
+        complete: function() {
+            $btn.prop('disabled', false).html('<i class="fas fa-rotate"></i> 立即同步复盘');
+        }
+    });
+}
+
+function loadAccuracyStats() {
+    $.ajax({ url: '/api/reviews/accuracy', method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) {
+            const hasValidated = !!r.data.has_validated_data;
+            const periodCounts = r.data.by_period_counts || {};
+            const validatedSamples = Number(r.data.validated_sample_count || 0);
+            const pendingCount = Number(r.data.pending_validation_count || 0);
+            const sampleScope = String(r.data.sample_scope || 'current_holdings');
+            const holdingValidatedSamples = Number(r.data.holding_validated_sample_count || 0);
+            $('#overallAccuracy').text(hasValidated ? (r.data.overall_accuracy + '%') : '--%');
+            $('#accuracy5d').text(hasValidated && (periodCounts['5d'] || 0) > 0 ? ((r.data.by_period || {})['5d'] + '%') : '--%');
+            $('#accuracy20d').text(hasValidated && (periodCounts['20d'] || 0) > 0 ? ((r.data.by_period || {})['20d'] + '%') : '--%');
+            $('#accuracy60d').text(hasValidated && (periodCounts['60d'] || 0) > 0 ? ((r.data.by_period || {})['60d'] + '%') : '--%');
+
+            const scopeText = sampleScope === 'broad_market'
+                ? `当前持仓仅有 ${holdingValidatedSamples} 条成熟样本，系统已自动切换到全市场 ${validatedSamples} 条真实已验证样本。`
+                : `当前统计基于当前持仓的 ${validatedSamples} 条真实已验证预测。`;
+            const noteText = hasValidated
+                ? `${scopeText} 仍有 ${pendingCount} 条待到期验证。`
+                : `暂无成熟样本，当前仍有 ${pendingCount} 条待到期验证。`;
+            $('#accuracyDataNote').text(noteText);
+
+            const assetNameMap = { a_stock: 'A股', hk_stock: '港股', us_stock: '美股', active_fund: '主动基金', etf: 'ETF', gold: '黄金' };
+            const assetCounts = r.data.by_asset_type_counts || {};
+            const assetKeys = Object.keys(r.data.by_asset_type || {}).filter(k => (assetCounts[k] || 0) > 0);
+            if (byAssetChart) byAssetChart.dispose();
+            byAssetChart = echarts.init(document.getElementById('byAssetChart'));
+            if (!hasValidated) {
+                byAssetChart.setOption({ title: { text: `暂无已验证数据\n待验证 ${r.data.pending_validation_count || 0} 条`, left: 'center', top: 'center', textStyle: { fontSize: 16 } } });
+            } else {
+                byAssetChart.setOption({ tooltip: { trigger: 'axis' }, xAxis: { type: 'category', data: assetKeys.map(k => assetNameMap[k] || k), axisLabel: { rotate: 45 } }, yAxis: { type: 'value', name: '准确率 (%)', max: 100 }, series: [{ type: 'bar', data: assetKeys.map(k => (r.data.by_asset_type || {})[k]), itemStyle: { color: '#00d4ff', borderRadius: [4,4,0,0] } }] });
+            }
+
+            const confidenceNameMap = { high: '高', medium: '中', low: '低' };
+            const confCounts = r.data.by_confidence_counts || {};
+            const confKeys = Object.keys(r.data.by_confidence || {}).filter(k => (confCounts[k] || 0) > 0);
+            if (byConfidenceChart) byConfidenceChart.dispose();
+            byConfidenceChart = echarts.init(document.getElementById('byConfidenceChart'));
+            if (!hasValidated) {
+                byConfidenceChart.setOption({ title: { text: '暂无已验证数据', left: 'center', top: 'center', textStyle: { fontSize: 16 } } });
+            } else {
+                byConfidenceChart.setOption({ tooltip: { trigger: 'axis' }, xAxis: { type: 'category', data: confKeys.map(k => confidenceNameMap[k] || k) }, yAxis: { type: 'value', name: '准确率 (%)', max: 100 }, series: [{ type: 'bar', data: confKeys.map(k => { const v = (r.data.by_confidence || {})[k]; return typeof v === 'object' ? v.accuracy : v; }), itemStyle: { color: '#6bcb77', borderRadius: [4,4,0,0] } }] });
+            }
+        }
+    } });
+}
+
+function loadBacktestReport() {
+    $.ajax({
+        url: '/api/reviews/backtest-report?days_lookback=30',
+        method: 'GET',
+        success: function(r) {
+            if (!(r.code === 200 && r.data)) {
+                $('#actionBacktestSummary').text('暂无动作回测数据');
+                return;
+            }
+            const data = r.data;
+            const tp = data.take_profit_analysis || {};
+            const add = data.add_signals_analysis || {};
+            const grades = data.action_quality_summary || {};
+            const hasSamples = !!grades.has_action_samples;
+            $('#actionOverallAccuracy').text(hasSamples ? ((data.overall_accuracy ?? 0) + '%') : '--');
+            $('#takeProfitHitRate').text(hasSamples ? ((tp.hit_rate ?? 0) + '%') : '--');
+            $('#addSignalRate').text(hasSamples ? ((add.profitable_rate ?? 0) + '%') : '--');
+            $('#actionOverallGrade').text(hasSamples ? (grades.overall_grade || '--') : '样本不足');
+            $('#actionBacktestSummary').html(
+                `${escapeHtml(data.recommendations || '暂无建议')}<br>` +
+                (hasSamples
+                    ? `止盈信号 ${tp.targets_hit || 0}/${tp.total_signals || 0} 达成，加仓信号 ${add.profitable_signals || 0}/${add.total_signals || 0} 盈利。`
+                    : `已开启自动复盘，当前动作样本 ${grades.sample_size || 0} 条，等待更多真实验证结果。`)
+            );
+        },
+        error: function() {
+            $('#actionBacktestSummary').text('动作回测数据加载失败');
+        }
+    });
+}
+
+function loadAccuracyTrend() {
+    const period = $('#trendPeriod').val();
+    $.ajax({ url: `/api/reviews/trend?days=${period}`, method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) {
+            if (accuracyTrendChart) accuracyTrendChart.dispose();
+            accuracyTrendChart = echarts.init(document.getElementById('accuracyTrendChart'));
+            accuracyTrendChart.setOption({ tooltip: { trigger: 'axis' }, xAxis: { type: 'category', data: r.data.map(i=>i.date), axisLabel: { rotate: 45 } }, yAxis: { type: 'value', name: '准确率 (%)', min: 0, max: 100 }, series: [{ type: 'line', data: r.data.map(i=>i.accuracy), smooth: true, lineStyle: { color: '#00d4ff', width: 3 }, areaStyle: { opacity: 0.1 } }] });
+        }
+    } });
+}
+
+function loadReport() {
+    $('#reportContent').html('<div class="text-center py-4"><div class="loading"></div><p>加载报告...</p></div>');
+    $.ajax({ url: `/api/reviews/report?type=${currentReportType}`, method: 'GET', success: function(r) {
+        if (r.code===200 && r.data) { $('#reportContent').html(`<h5>${r.data.title}</h5><pre style="white-space:pre-wrap;font-family:inherit;">${escapeHtml(r.data.content)}</pre>`); }
+        else { $('#reportContent').html('<div class="alert alert-info">暂无报告数据</div>'); }
+    }, error: function() { $('#reportContent').html('<div class="alert alert-danger">加载失败</div>'); } });
+}
+
+function loadRecentReviews() {
+    $.ajax({ url: '/api/reviews/recent?limit=20', method: 'GET', success: function(r) {
+        if (r.code===200 && r.data && r.data.length) {
+            let html = '';
+            for (const item of r.data) {
+                const isPending = item.status === 'pending' || item.is_direction_correct === null;
+                const isCorrect = item.is_direction_correct;
+                const actualText = isPending ? '待验证' : (item.actual_direction === 'up' ? '上涨' : '下跌');
+                const actualCls = isPending ? 'text-muted' : (isCorrect ? 'text-success' : 'text-danger');
+                const resultTag = isPending ? '<span class="badge bg-secondary">待验证</span>' : (isCorrect ? '<span class="badge-low">准确</span>' : '<span class="badge-high">错误</span>');
+                const predictedText = item.predicted_direction ? (item.predicted_direction === 'up' ? '上涨' : '下跌') : ((Number(item.predicted_up_prob || 50) >= 50) ? '上涨' : '下跌');
+                html += `<tr>
+                    <td>${item.expiry_date || item.reviewed_at}</td>
+                    <td><strong>${escapeHtml(item.name || item.code)}</strong></td>
+                    <td>${item.period_days}日</td>
+                    <td>${predictedText}</td>
+                    <td class="${actualCls}">${actualText}</td>
+                    <td>${resultTag}</td>
+                    <td class="small">${escapeHtml(item.error_analysis || '-')}</td>
+                </tr>`;
+            }
+            $('#recentReviewsList').html(html);
+        } else { $('#recentReviewsList').html('<tr><td colspan="7" class="text-center">暂无复盘记录</td></tr>'); }
+    }, error: function() { $('#recentReviewsList').html('<tr><td colspan="7" class="text-center text-danger">加载失败</td></tr>'); } });
+}
+
+$(document).ready(function() {
+    loadAccuracyStats(); loadAccuracyTrend(); loadReport(); loadRecentReviews(); loadBacktestReport();
+    $('#trendPeriod').on('change', function() { loadAccuracyTrend(); });
+    $('#syncReviewsBtn').on('click', function() { runReviewSync(); });
+    $('#weeklyReportBtn').on('click', function() { currentReportType = 'weekly'; $(this).addClass('active').siblings().removeClass('active'); loadReport(); });
+    $('#monthlyReportBtn').on('click', function() { currentReportType = 'monthly'; $(this).addClass('active').siblings().removeClass('active'); loadReport(); });
+    $(window).resize(function() { if (byAssetChart) byAssetChart.resize(); if (byConfidenceChart) byConfidenceChart.resize(); if (accuracyTrendChart) accuracyTrendChart.resize(); });
+
+    setInterval(function() {
+        if (document.hasFocus()) {
+            loadAccuracyStats();
+            loadRecentReviews();
+            loadBacktestReport();
+        }
+    }, 60000);
+});
+</script>
+{% endblock %}
