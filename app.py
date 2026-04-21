@@ -288,10 +288,13 @@ def init_app():
     logger.info("=" * 50)
 
 
+# 初始化应用（注册路由等）- 确保 gunicorn 也能加载
+init_app()
+
+
 # ==================== 启动入口 ====================
 
 if __name__ == '__main__':
-    init_app()
     # 无终端后台启动时默认关闭 reloader，可通过 USE_RELOADER=true 显式开启
     use_reloader = os.environ.get('USE_RELOADER', 'false').lower() == 'true'
     app.run(host=HOST, port=PORT, debug=DEBUG, use_reloader=use_reloader)
