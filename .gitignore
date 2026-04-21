@@ -17,3 +17,5 @@ logs/
 # Python
 __pycache__/
 *.pyc
+data/collect_progress/
+*.tar.gz
