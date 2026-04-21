@@ -30,9 +30,32 @@ for dir_path in [DATA_DIR, MODELS_DIR, DATABASE_DIR, LOGS_DIR,
                   REPORTS_DIR, PROGRESS_DIR, CACHE_DIR, BACKUP_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
-# 数据库配置
-DATABASE_PATH = DATABASE_DIR / 'finance.db'
-DATABASE_URL = f'sqlite:///{DATABASE_PATH}'
+# ==================== 数据库配置（支持 SQLite 和 MySQL） ====================
+
+# 数据库类型选择：'sqlite' 或 'mysql'
+DB_TYPE = os.environ.get('DB_TYPE', 'sqlite').lower()
+
+# MySQL 配置（当 DB_TYPE = 'mysql' 时使用）
+MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
+MYSQL_PORT = int(os.environ.get('MYSQL_PORT', 3306))
+MYSQL_USER = os.environ.get('MYSQL_USER', 'root')
+MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
+MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'finance')
+
+# SQLite 配置
+SQLITE_PATH = DATABASE_DIR / 'finance.db'
+
+# 根据 DB_TYPE 构建 DATABASE_URL
+if DB_TYPE == 'mysql':
+    # 需要安装 pymysql: pip install pymysql
+    DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}?charset=utf8mb4"
+else:
+    DATABASE_URL = f"sqlite:///{SQLITE_PATH}"
+
+# 数据库连接池配置（仅 MySQL 生效）
+DB_POOL_SIZE = int(os.environ.get('DB_POOL_SIZE', 10))
+DB_POOL_MAX_OVERFLOW = int(os.environ.get('DB_POOL_MAX_OVERFLOW', 20))
+DB_POOL_RECYCLE = int(os.environ.get('DB_POOL_RECYCLE', 3600))
 
 # Flask配置
 SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-here-change-in-production')
@@ -634,6 +657,15 @@ FEATURE_PREDICT_AI = True      # 是否启用AI预测
 FEATURE_AUTO_ALERT = True      # 是否启用自动预警
 FEATURE_EMAIL_NOTIFY = True    # 是否启用邮件通知
 FEATURE_SMS_NOTIFY = False     # 是否启用短信通知（可选）
+
+def get_db_info() -> Dict[str, Any]:
+    """获取数据库连接信息"""
+    return {
+        'type': DB_TYPE,
+        'url': DATABASE_URL.replace(MYSQL_PASSWORD, '***') if MYSQL_PASSWORD else DATABASE_URL,
+        'pool_size': DB_POOL_SIZE if DB_TYPE == 'mysql' else None,
+        'pool_max_overflow': DB_POOL_MAX_OVERFLOW if DB_TYPE == 'mysql' else None,
+    }
 
 
 if __name__ == '__main__':
