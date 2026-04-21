@@ -14,7 +14,7 @@ from sqlalchemy import text
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config import SECRET_KEY, DEBUG, HOST, PORT, DATABASE_PATH
+from config import SECRET_KEY, DEBUG, HOST, PORT, SQLITE_PATH
 from models import init_database, get_session
 from utils import get_logger, ensure_dir
 
@@ -32,7 +32,7 @@ app.config['JSON_AS_ASCII'] = False
 
 # 确保必要目录存在
 ensure_dir('logs')
-ensure_dir(os.path.dirname(DATABASE_PATH))
+ensure_dir(os.path.dirname(SQLITE_PATH))
 
 # 初始化数据库
 try:
