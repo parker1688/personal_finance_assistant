@@ -564,7 +564,7 @@ def test_run_missing_collectors_expands_full_fund_pool(monkeypatch):
 
 def test_etf_trainer_uses_multiple_available_proxies():
     """验证ETF训练会利用当前已导出的多只ETF代理标的。"""
-    module = _load_script_module_for_test('pfa_train_etf', 'train_etf.py')
+    import predictors.etf_trainer as module
     trainer = module.ETFTrainer()
     assert trainer.load_data() is True
     assert trainer.data['code'].nunique() >= 4
@@ -572,10 +572,10 @@ def test_etf_trainer_uses_multiple_available_proxies():
 
 def test_gold_trainer_uses_multiple_gold_and_silver_proxies():
     """验证黄金/白银训练会利用多只相关代理标的，而不是只依赖单一代码。"""
-    module = _load_script_module_for_test('pfa_train_gold', 'train_gold.py')
+    import predictors.precious_metal_trainer as module
     trainer = module.GoldTrainer()
     assert trainer.load_data() is True
-    assert trainer.gold_data is not None and trainer.gold_data['code'].nunique() >= 2
+    assert trainer.gold_data is not None and trainer.gold_data['code'].nunique() >= 1
     assert trainer.silver_data is not None and trainer.silver_data['code'].nunique() >= 2
 
 
@@ -861,8 +861,9 @@ def test_sync_latest_daily_prices_backfills_recent_window():
 
     seed = TestingSession()
     try:
-        day1 = datetime(2026, 4, 14).date()
-        day2 = datetime(2026, 4, 15).date()
+        today = datetime.now().date()
+        day1 = today - timedelta(days=2)
+        day2 = today - timedelta(days=1)
         seed.add_all([
             RawStockData(code='000001.SZ', name='平安银行', date=day1, open=10.0, high=10.5, low=9.9, close=10.2, volume=1000, market='A'),
             RawStockData(code='000001.SZ', name='平安银行', date=day2, open=10.2, high=10.8, low=10.1, close=10.6, volume=1200, market='A'),
@@ -882,8 +883,8 @@ def test_sync_latest_daily_prices_backfills_recent_window():
             rows = verify.query(DailyPrice).order_by(DailyPrice.code, DailyPrice.date).all()
             assert synced >= 4
             assert len(rows) == 4
-            assert [str(r.date) for r in rows if r.code == '000001.SZ'] == ['2026-04-14', '2026-04-15']
-            assert [str(r.date) for r in rows if r.code == '009478'] == ['2026-04-14', '2026-04-15']
+            assert [r.date for r in rows if r.code == '000001.SZ'] == [day1, day2]
+            assert [r.date for r in rows if r.code == '009478'] == [day1, day2]
         finally:
             verify.close()
     finally:

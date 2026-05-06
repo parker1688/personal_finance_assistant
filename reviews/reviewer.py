@@ -400,56 +400,105 @@ class Reviewer:
             })
             return 0
 
+    # 各资产重训配置：asset_type 为模块调度键，args 为兼容旧脚本参数
+    _ASSET_RETRAIN_CONFIG = {
+        'a_stock':  {'asset_type': 'a_stock',  'args': []},
+        'fund':     {'asset_type': 'fund',      'args': []},
+        'gold':     {'asset_type': 'gold',      'args': ['--asset', 'gold',   '--periods', '5,20,60']},
+        'silver':   {'asset_type': 'silver',    'args': ['--asset', 'silver', '--periods', '5,20,60']},
+        'etf':      {'asset_type': 'etf',       'args': ['--periods', '5,20,60']},
+        'hk_stock': {'asset_type': 'hk_stock',  'args': []},
+        'us_stock': {'asset_type': 'us_stock',  'args': []},
+    }
+    _ALL_ASSETS = list(_ASSET_RETRAIN_CONFIG.keys())
+
     def _auto_retrain_from_reflection(self, retrain_targets):
-        """根据反思学习目标自动触发模型重训。"""
-        try:
-            from predictors.model_trainer import ModelTrainer
+        """根据反思学习目标自动触发模型重训（覆盖全资产）。"""
+        from predictors.training_dispatcher import run_asset_training
 
-            # 将反思目标映射为预测周期
-            periods = set()
-            for period, _asset in retrain_targets:
-                if period == 'all':
-                    periods.update([5, 20, 60])
-                elif isinstance(period, int) and period in (5, 20, 60):
-                    periods.add(period)
+        # 解析 retrain_targets → 需要重训的资产集合 + 周期集合
+        need_assets = set()
+        periods = set()
+        for period, asset in retrain_targets:
+            if asset == 'all':
+                need_assets.update(self._ALL_ASSETS)
+            elif asset:
+                need_assets.add(str(asset))
+            if period == 'all':
+                periods.update([5, 20, 60])
+            elif isinstance(period, int) and period in (5, 20, 60):
+                periods.add(period)
 
-            if not periods:
-                logger.info("反思学习未命中可重训周期，跳过自动重训")
-                self._update_learning_status('last_retrain', {
-                    'time': datetime.now().isoformat(),
-                    'status': 'skipped',
-                    'periods': [],
-                    'results': {},
-                    'error': None
-                })
-                return
-
-            logger.warning(f"触发自动重训（反思闭环）: 目标周期={sorted(periods)}")
+        if not need_assets:
+            logger.info("反思学习未命中可重训资产，跳过自动重训")
             self._update_learning_status('last_retrain', {
                 'time': datetime.now().isoformat(),
-                'status': 'running',
-                'periods': sorted(periods),
+                'status': 'skipped',
+                'assets': [],
+                'periods': [],
                 'results': {},
                 'error': None
             })
-            trainer = ModelTrainer()
-            results = trainer.train_all_models(target_periods=sorted(periods))
-            logger.warning(f"自动重训完成（反思闭环）: {results}")
-            self._update_learning_status('last_retrain', {
-                'time': datetime.now().isoformat(),
-                'status': 'success',
-                'periods': sorted(periods),
-                'results': results,
-                'error': None
-            })
+            return
 
-        except Exception as e:
-            logger.error(f"自动重训失败（反思闭环）: {e}", exc_info=True)
-            self._update_learning_status('last_retrain', {
-                'time': datetime.now().isoformat(),
-                'status': 'failed',
-                'error': str(e)
-            })
+        logger.warning(f"触发自动重训（反思闭环）: 资产={sorted(need_assets)}, 周期={sorted(periods)}")
+        self._update_learning_status('last_retrain', {
+            'time': datetime.now().isoformat(),
+            'status': 'running',
+            'assets': sorted(need_assets),
+            'periods': sorted(periods),
+            'results': {},
+            'error': None
+        })
+
+        all_results = {}
+
+        for asset in self._ALL_ASSETS:  # 按固定顺序执行
+            if asset not in need_assets:
+                continue
+            cfg = self._ASSET_RETRAIN_CONFIG[asset]
+            run_args = list(cfg.get('args') or [])
+
+            # 支持按周期定向重训的资产：A股 / ETF / 黄金 / 白银
+            if asset in {'a_stock', 'etf', 'gold', 'silver'} and periods and periods != {5, 20, 60}:
+                # 去掉默认 --periods，再追加定向周期
+                cleaned = []
+                skip_next = False
+                for arg in run_args:
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    if arg == '--periods':
+                        skip_next = True
+                        continue
+                    cleaned.append(arg)
+                run_args = cleaned + ['--periods', ','.join(str(p) for p in sorted(periods))]
+
+            logger.info(f"开始重训 {asset}: module={cfg['asset_type']} args={run_args}")
+            try:
+                ok = run_asset_training(cfg['asset_type'], run_args)
+                if ok:
+                    logger.info(f"重训成功 {asset}")
+                    all_results[asset] = 'success'
+                else:
+                    logger.error(f"重训失败 {asset}")
+                    all_results[asset] = 'failed'
+            except Exception as e:
+                logger.error(f"重训异常 {asset}: {e}")
+                all_results[asset] = f'error_{type(e).__name__}'
+
+        overall = 'success' if all(v == 'success' for v in all_results.values()) else (
+            'partial' if any(v == 'success' for v in all_results.values()) else 'failed'
+        )
+        logger.warning(f"自动重训完成（反思闭环）: {all_results}")
+        self._update_learning_status('last_retrain', {
+            'time': datetime.now().isoformat(),
+            'status': overall,
+            'assets': sorted(need_assets),
+            'periods': sorted(periods),
+            'results': all_results,
+            'error': None
+        })
     
     def _get_local_price_only(self, code, target_date):
         """仅使用本地数据库价格，允许匹配最近交易日，避免在批量回填时走外部慢查询。"""

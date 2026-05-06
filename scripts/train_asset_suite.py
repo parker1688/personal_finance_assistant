@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from predictors.training_dispatcher import run_asset_training
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -31,6 +33,23 @@ SCRIPTS_DIR = PROJECT_ROOT / 'scripts'
 MODELS_DIR = PROJECT_ROOT / 'data' / 'models'
 PROGRESS_FILE = MODELS_DIR / 'training_progress.json'
 LEARNING_STATUS_FILE = PROJECT_ROOT / 'data' / 'cache' / 'learning_loop_status.json'
+
+
+def _resolve_project_python() -> str:
+    candidates = []
+    if os.name == 'nt':
+        candidates.append(PROJECT_ROOT / '.venv' / 'Scripts' / 'python.exe')
+    else:
+        candidates.append(PROJECT_ROOT / '.venv' / 'bin' / 'python')
+    candidates.append(Path(sys.executable))
+
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+        except Exception:
+            continue
+    return sys.executable
 
 
 def _default_learning_status() -> Dict[str, Any]:
@@ -117,14 +136,15 @@ def _pending_post_training_state() -> Dict[str, Any]:
     }
 
 
-def _write_training_progress(payload: Dict[str, Any]) -> None:
+def _write_training_progress(payload: Dict[str, Any], progress_file: Optional[str | Path] = None) -> None:
     """将训练进度持久化，供前端实时展示。"""
     try:
-        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        target_path = Path(progress_file) if progress_file else PROGRESS_FILE
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         current: Dict[str, Any] = {}
-        if PROGRESS_FILE.exists():
+        if target_path.exists():
             try:
-                current = json.loads(PROGRESS_FILE.read_text(encoding='utf-8'))
+                current = json.loads(target_path.read_text(encoding='utf-8'))
                 if not isinstance(current, dict):
                     current = {}
             except Exception:
@@ -135,7 +155,7 @@ def _write_training_progress(payload: Dict[str, Any]) -> None:
             **(payload or {}),
             'updated_at': datetime.now().isoformat(),
         }
-        PROGRESS_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding='utf-8')
+        target_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding='utf-8')
     except Exception as exc:
         print(f'⚠️  写入训练进度失败: {exc}')
 
@@ -268,6 +288,7 @@ def build_training_plan(only_assets: Optional[List[str]] = None, include_late_ma
 
         entry['script_path'] = str(script_path)
         entry['script_exists'] = script_path.exists()
+        entry['execution_mode'] = 'script' if entry['script_exists'] else 'module'
         entry['existing_models'] = existing_models
         entry['missing_models'] = missing_models
         entry['mode'] = 'optimize' if existing_models else 'bootstrap'
@@ -407,7 +428,7 @@ def print_training_plan(plan: List[Dict[str, Any]]) -> None:
         if step['missing_models']:
             print(f"    待补: {', '.join(step['missing_models'])}")
         if not step['script_exists']:
-            print('    ⚠️  训练脚本缺失')
+            print('    ℹ️  使用模块调度执行（无脚本壳）')
 
     print('=' * 72)
 
@@ -419,6 +440,7 @@ def run_training_plan(
     stop_on_error: bool = False,
     skip_existing: bool = False,
     enable_self_optimization: bool = True,
+    progress_file: Optional[str | Path] = None,
 ) -> List[Dict[str, Any]]:
     """按顺序运行训练计划。"""
     plan = plan or build_training_plan()
@@ -438,7 +460,7 @@ def run_training_plan(
         'pid': os.getpid(),
         'results': [],
         **_pending_post_training_state(),
-    })
+    }, progress_file=progress_file)
 
     for idx, step in enumerate(plan, start=1):
         result = {
@@ -462,7 +484,7 @@ def run_training_plan(
             'pid': os.getpid(),
             'results': results,
             **_pending_post_training_state(),
-        })
+        }, progress_file=progress_file)
 
         if skip_existing and not step['missing_models']:
             result['status'] = 'skipped'
@@ -479,44 +501,36 @@ def run_training_plan(
                 'message': f"已跳过 {step['label']}（模型已存在）",
                 'results': results,
                 **_pending_post_training_state(),
-            })
+            }, progress_file=progress_file)
             print(f"⏭️  [{idx}/{len(plan)}] 跳过 {step['label']}：模型已存在")
             continue
 
-        if not step['script_exists']:
-            result['status'] = 'failed'
-            result['error'] = 'training script not found'
-            results.append(result)
-            _write_training_progress({
-                'status': 'failed' if stop_on_error else 'running',
-                'total_steps': total_steps,
-                'completed_steps': idx,
-                'current_step': idx,
-                'progress_percent': round((idx / total_steps) * 100, 1) if total_steps else 100.0,
-                'current_asset': step['label'],
-                'current_asset_type': step['asset_type'],
-                'current_stage': 'failed',
-                'message': f"{step['label']} 训练脚本缺失",
-                'results': results,
-                **_pending_post_training_state(),
-            })
-            print(f"❌ [{idx}/{len(plan)}] {step['label']} 失败：脚本不存在 {step['script']}")
-            if stop_on_error:
-                break
-            continue
-
-        cmd = [sys.executable, str(step['script_path']), *(step.get('args') or [])]
         print(f"🚀 [{idx}/{len(plan)}] 开始{step['mode']} {step['label']} 模型")
-        print(f"    命令: {' '.join(cmd)}")
+        if step['script_exists']:
+            python_executable = _resolve_project_python()
+            cmd = [python_executable, str(step['script_path']), *(step.get('args') or [])]
+            print(f"    命令: {' '.join(cmd)}")
+        else:
+            print(f"    模式: module dispatcher ({step['asset_type']}) args={step.get('args') or []}")
 
         if dry_run:
             result['status'] = 'planned'
             results.append(result)
             continue
 
-        completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False)
-        result['returncode'] = int(completed.returncode)
-        result['status'] = 'success' if completed.returncode == 0 else 'failed'
+        try:
+            if step['script_exists']:
+                completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False)
+                result['returncode'] = int(completed.returncode)
+                result['status'] = 'success' if completed.returncode == 0 else 'failed'
+            else:
+                ok = run_asset_training(step['asset_type'], step.get('args') or [])
+                result['returncode'] = 0 if ok else 1
+                result['status'] = 'success' if ok else 'failed'
+        except Exception as exc:
+            result['returncode'] = 1
+            result['status'] = 'failed'
+            result['error'] = str(exc)
         results.append(result)
 
         if result['status'] == 'success':
@@ -536,7 +550,7 @@ def run_training_plan(
             'message': f"{step['label']} {'完成' if result['status'] == 'success' else '失败'}",
             'results': results,
             **_pending_post_training_state(),
-        })
+        }, progress_file=progress_file)
 
         if stop_on_error and result['status'] != 'success':
             break
@@ -553,7 +567,7 @@ def run_training_plan(
         'message': '模型训练完成，正在执行复盘检查' if final_failed_count == 0 else f'训练完成，但有 {final_failed_count} 个资产失败',
         'results': results,
         **_pending_post_training_state(),
-    })
+    }, progress_file=progress_file)
 
     review_result = _run_post_training_review() if final_failed_count == 0 else {
         'status': 'skipped',
@@ -593,6 +607,7 @@ def run_training_plan(
                     stop_on_error=stop_on_error,
                     skip_existing=False,
                     enable_self_optimization=False,
+                    progress_file=progress_file,
                 )
                 auto_optimization_result = {
                     'status': 'success',
@@ -653,7 +668,7 @@ def run_training_plan(
         'post_training_reflection': reflection_result,
         'post_training_auto_optimization': auto_optimization_result,
         'finished_at': datetime.now().isoformat(),
-    })
+    }, progress_file=progress_file)
 
     return results
 
@@ -666,10 +681,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--skip-existing', action='store_true', help='对已有模型的资产直接跳过')
     parser.add_argument('--plan-only', action='store_true', help='只展示计划，不实际执行')
     parser.add_argument('--stop-on-error', action='store_true', help='遇到失败立即停止')
+    parser.add_argument('--disable-self-optimization', action='store_true', help='禁用训练后的自动反思重训，仅执行当前训练计划')
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # 若由 Flask API 通过 TRAINING_LOG_FILE 环境变量指定日志路径，则将 stdout/stderr 重定向到该文件
+    _log_file_handle = None
+    _training_log_path = os.environ.get('TRAINING_LOG_FILE', '').strip()
+    if _training_log_path:
+        try:
+            _log_dir = Path(_training_log_path).parent
+            _log_dir.mkdir(parents=True, exist_ok=True)
+            _log_file_handle = open(_training_log_path, 'a', encoding='utf-8', buffering=1)
+            sys.stdout = _log_file_handle
+            sys.stderr = _log_file_handle
+        except Exception as _log_err:
+            print(f'⚠️  无法打开训练日志文件 {_training_log_path}: {_log_err}', flush=True)
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -686,6 +715,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         dry_run=bool(args.plan_only),
         stop_on_error=bool(args.stop_on_error),
         skip_existing=bool(args.skip_existing),
+        enable_self_optimization=not bool(args.disable_self_optimization),
     )
 
     failed_count = sum(1 for item in results if item.get('status') == 'failed')
@@ -700,7 +730,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     print('=' * 72)
 
-    return 0 if failed_count == 0 else 1
+    exit_code = 0 if failed_count == 0 else 1
+
+    # 关闭日志文件句柄（如果已重定向）
+    if _log_file_handle is not None:
+        try:
+            sys.stdout = sys.__stdout__
+            sys.stderr = sys.__stderr__
+            _log_file_handle.flush()
+            _log_file_handle.close()
+        except Exception:
+            pass
+
+    return exit_code
 
 
 if __name__ == '__main__':
