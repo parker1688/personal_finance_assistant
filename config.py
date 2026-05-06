@@ -59,7 +59,7 @@ DB_POOL_RECYCLE = int(os.environ.get('DB_POOL_RECYCLE', 3600))
 
 # Flask配置
 SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-here-change-in-production')
-DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
+DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
 HOST = os.environ.get('HOST', '0.0.0.0')
 PORT = int(os.environ.get('PORT', 8080))
 

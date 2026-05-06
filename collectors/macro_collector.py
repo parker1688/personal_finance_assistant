@@ -37,7 +37,10 @@ class MacroCollector(BaseCollector):
 
     def _get_tushare_pro(self):
         """兼容不同版本 TuShare 的连接方式。"""
-        import tushare as ts
+        try:
+            import tushare as ts
+        except ImportError:
+            return None
 
         try:
             return ts.pro_api()
@@ -132,7 +135,11 @@ class MacroCollector(BaseCollector):
         更新频率: 每月 (国家统计局)
         改进: 之前是0.2%的硬编码，现在使用真实API
         """
-        import tushare as ts
+        try:
+            import tushare as ts
+        except ImportError:
+            logger.warning("get_cpi: tushare 未安装，跳过")
+            return None
         import pandas as pd
         
         try:
@@ -216,7 +223,10 @@ class MacroCollector(BaseCollector):
         更新频率: 每月
         改进: 之前是50.2的硬编码，现在使用真实API
         """
-        import tushare as ts
+        try:
+            import tushare as ts
+        except ImportError:
+            return None
         import pandas as pd
         
         try:
@@ -325,7 +335,10 @@ class MacroCollector(BaseCollector):
             
         改进: 之前是硬编码的汇率 (7.25), 现在使用真实API
         """
-        import tushare as ts
+        try:
+            import tushare as ts
+        except ImportError:
+            return None
         
         try:
             pro = self._get_tushare_pro()
@@ -573,7 +586,10 @@ class MacroCollector(BaseCollector):
             DataFrame: 每日宏观指标
         """
         import pandas as pd
-        import tushare as ts
+        try:
+            import tushare as ts
+        except ImportError:
+            return None
         
         dates = pd.date_range(start=start_date, end=end_date, freq='D')
         
@@ -624,7 +640,10 @@ class MacroCollector(BaseCollector):
         Args:
             month: YYYY-MM 格式的月份字符串
         """
-        import tushare as ts
+        try:
+            import tushare as ts
+        except ImportError:
+            return None
         
         try:
             pro = self._get_tushare_pro()
@@ -646,7 +665,10 @@ class MacroCollector(BaseCollector):
         Args:
             month: YYYY-MM 格式的月份字符串
         """
-        import tushare as ts
+        try:
+            import tushare as ts
+        except ImportError:
+            return None
         
         try:
             pro = self._get_tushare_pro()

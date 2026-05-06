@@ -132,6 +132,7 @@ def register_logs_routes(app):
     @require_admin_access(action='logs.read')
     def get_logs():
         """获取系统日志"""
+        session = None
         try:
             page = int(request.args.get('page', 1))
             size = int(request.args.get('size', 50))
@@ -142,7 +143,6 @@ def register_logs_routes(app):
             source = request.args.get('source', 'all')
 
             items = []
-            session = None
             if source in {'all', 'system'}:
                 session = get_session()
                 query = session.query(Log)
@@ -182,9 +182,6 @@ def register_logs_routes(app):
                 'stack_trace': item.get('stack_trace')
             } for item in paged_items]
 
-            if session is not None:
-                session.close()
-
             return jsonify({
                 'code': 200,
                 'status': 'success',
@@ -205,11 +202,15 @@ def register_logs_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session is not None:
+                session.close()
     
     @app.route('/api/logs', methods=['DELETE'])
     @require_admin_access(action='logs.clear')
     def clear_logs():
         """清空日志"""
+        session = None
         try:
             before_date = request.args.get('before_date', '')
             
@@ -221,7 +222,6 @@ def register_logs_routes(app):
                 deleted = session.query(Log).delete()
             
             session.commit()
-            session.close()
             
             log_admin_audit('logs.clear', 'success', f"deleted_count={deleted}")
             return jsonify({
@@ -240,11 +240,15 @@ def register_logs_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session is not None:
+                session.close()
     
     @app.route('/api/logs/export', methods=['GET'])
     @require_admin_access(action='logs.export')
     def export_logs():
         """导出日志"""
+        session = None
         try:
             level = request.args.get('level', '')
             start_date = request.args.get('start_date', '')
@@ -279,8 +283,6 @@ def register_logs_routes(app):
                     log.message
                 ])
             
-            session.close()
-            
             output.seek(0)
             from flask import send_file
             return send_file(
@@ -298,3 +300,6 @@ def register_logs_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session is not None:
+                session.close()

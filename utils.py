@@ -394,32 +394,53 @@ class FileCache:
 # ==================== Tushare 连接 ====================
 
 _tushare_pro = None
+_tushare_init_failed = False
+_tushare_init_error = None
 
 
 def get_tushare_pro():
     """获取Tushare连接（单例）"""
-    global _tushare_pro
+    global _tushare_pro, _tushare_init_failed, _tushare_init_error
+
+    if _tushare_init_failed:
+        return None
     
     if _tushare_pro is None:
         try:
             import tushare as ts
-            
+
             if TUSHARE_TOKEN:
-                ts.set_token(TUSHARE_TOKEN)
-                _tushare_pro = ts.pro_api()
+                # 兼容不同 tushare 版本：部分版本支持 pro_api(token) 但不提供 set_token
+                if hasattr(ts, 'set_token'):
+                    ts.set_token(TUSHARE_TOKEN)
+
+                if hasattr(ts, 'pro_api'):
+                    try:
+                        _tushare_pro = ts.pro_api()
+                    except TypeError:
+                        _tushare_pro = ts.pro_api(TUSHARE_TOKEN)
+                else:
+                    raise AttributeError("tushare 模块缺少 pro_api")
+
                 logger = get_logger(__name__)
                 logger.info("Tushare连接成功")
             else:
                 logger = get_logger(__name__)
                 logger.warning("TUSHARE_TOKEN未设置")
+                _tushare_init_failed = True
+                _tushare_init_error = "TUSHARE_TOKEN未设置"
                 return None
         except ImportError:
             logger = get_logger(__name__)
             logger.warning("tushare未安装")
+            _tushare_init_failed = True
+            _tushare_init_error = "tushare未安装"
             return None
         except Exception as e:
             logger = get_logger(__name__)
             logger.error(f"Tushare初始化失败: {e}")
+            _tushare_init_failed = True
+            _tushare_init_error = str(e)
             return None
     
     return _tushare_pro

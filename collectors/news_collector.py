@@ -31,10 +31,23 @@ try:
     from config import TUSHARE_TOKEN, NEWSAPI_KEY, NEWSAPI_ENABLED
     ts.set_token(TUSHARE_TOKEN)
     pro = ts.pro_api()
-    print("✅ Tushare连接成功")
-except Exception as e:
-    print(f"❌ Tushare连接失败: {e}")
+    print("[OK] Tushare连接成功")
+except ImportError:
+    print("[WARN] Tushare连接失败: No module named 'tushare'")
     pro = None
+    try:
+        from config import NEWSAPI_KEY, NEWSAPI_ENABLED
+    except ImportError:
+        NEWSAPI_KEY = None
+        NEWSAPI_ENABLED = False
+except Exception as e:
+    print(f"[WARN] Tushare连接失败: {e}")
+    pro = None
+    try:
+        from config import NEWSAPI_KEY, NEWSAPI_ENABLED
+    except Exception:
+        NEWSAPI_KEY = None
+        NEWSAPI_ENABLED = False
 
 PROGRESS_DIR = 'data/collect_progress'
 os.makedirs(PROGRESS_DIR, exist_ok=True)

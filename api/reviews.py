@@ -473,10 +473,19 @@ def register_reviews_routes(app):
             recent_reviews = session.query(Review).order_by(
                 Review.reviewed_at.desc()
             ).all()
+
+            prediction_ids = [
+                int(r.prediction_id) for r in recent_reviews
+                if getattr(r, 'prediction_id', None)
+            ]
+            prediction_map = {}
+            if prediction_ids:
+                prediction_rows = session.query(Prediction).filter(Prediction.id.in_(prediction_ids)).all()
+                prediction_map = {int(p.id): p for p in prediction_rows}
             
             recent_list = []
             for r in recent_reviews:
-                pred = session.query(Prediction).filter(Prediction.id == r.prediction_id).first() if r.prediction_id else None
+                pred = prediction_map.get(int(r.prediction_id)) if r.prediction_id else None
                 if pred and not _prediction_has_real_price_source(session, pred):
                     continue
                 if not _is_current_holding_prediction(pred or r, holding_keys):
@@ -510,10 +519,18 @@ def register_reviews_routes(app):
                 deduped_recent_list.append(item)
             recent_list = deduped_recent_list
 
-            pending_validation_count = sum(
-                1 for p in session.query(Prediction).filter(Prediction.is_direction_correct.is_(None)).all()
-                if (sample_scope != 'current_holdings' or _is_current_holding_prediction(p, holding_keys))
-            )
+            pending_codes = [
+                str(code or '') for (code,) in session.query(Prediction.code).filter(
+                    Prediction.is_direction_correct.is_(None)
+                ).all()
+            ]
+            if sample_scope != 'current_holdings':
+                pending_validation_count = len(pending_codes)
+            else:
+                pending_validation_count = sum(
+                    1 for code in pending_codes
+                    if _normalize_holding_code(code) in holding_keys
+                )
             
             session.close()
             
@@ -797,15 +814,25 @@ def register_reviews_routes(app):
             _ensure_due_reviews_current()
             limit = int(request.args.get('limit', 20))
             session = get_session()
+            today = get_today()
             holding_keys = _get_current_holding_code_keys(session)
             
             reviews = session.query(Review).order_by(
                 Review.reviewed_at.desc()
             ).all()
+
+            prediction_ids = [
+                int(r.prediction_id) for r in reviews
+                if getattr(r, 'prediction_id', None)
+            ]
+            prediction_map = {}
+            if prediction_ids:
+                prediction_rows = session.query(Prediction).filter(Prediction.id.in_(prediction_ids)).all()
+                prediction_map = {int(p.id): p for p in prediction_rows}
             
             reviews_list = []
             for r in reviews:
-                pred = session.query(Prediction).filter(Prediction.id == r.prediction_id).first() if r.prediction_id else None
+                pred = prediction_map.get(int(r.prediction_id)) if r.prediction_id else None
                 if pred and not _prediction_has_real_price_source(session, pred):
                     continue
                 if not _is_current_holding_prediction(pred or r, holding_keys):
@@ -833,11 +860,25 @@ def register_reviews_routes(app):
                 pending_preds = session.query(Prediction).filter(
                     Prediction.is_direction_correct.is_(None)
                 ).order_by(
+                    Prediction.expiry_date.asc(),
                     Prediction.created_at.desc()
                 ).all()
                 for p in pending_preds:
                     if not _is_current_holding_prediction(p, holding_keys):
                         continue
+                    days_to_expiry = None
+                    try:
+                        if p.expiry_date is not None:
+                            days_to_expiry = int((p.expiry_date - today).days)
+                    except Exception:
+                        days_to_expiry = None
+                    pending_note = '待到期验证'
+                    if days_to_expiry is not None and days_to_expiry < 0:
+                        pending_note = f'已到期{abs(days_to_expiry)}天，待复盘'
+                    elif days_to_expiry == 0:
+                        pending_note = '今日到期，待复盘'
+                    elif days_to_expiry is not None:
+                        pending_note = f'{days_to_expiry}天后到期'
                     reviews_list.append({
                         'id': p.id,
                         'code': p.code,
@@ -849,10 +890,11 @@ def register_reviews_routes(app):
                         'actual_return': None,
                         'is_direction_correct': None,
                         'is_target_correct': None,
-                        'error_analysis': '待到期验证',
+                        'error_analysis': pending_note,
                         'status': 'pending',
                         'reviewed_at': p.created_at.strftime('%Y-%m-%d %H:%M') if p.created_at else '',
                         'expiry_date': p.expiry_date.strftime('%Y-%m-%d') if p.expiry_date else '',
+                        'days_to_expiry': days_to_expiry,
                     })
 
             deduped_reviews = []
@@ -871,8 +913,7 @@ def register_reviews_routes(app):
                 seen.add(key)
                 deduped_reviews.append(item)
 
-            def _recent_sort_key(item):
-                raw = item.get('reviewed_at') or item.get('expiry_date') or ''
+            def _parse_dt(raw):
                 try:
                     if len(raw) == 10:
                         return datetime.fromisoformat(raw + ' 00:00:00')
@@ -880,7 +921,27 @@ def register_reviews_routes(app):
                 except Exception:
                     return datetime.min
 
-            reviews_list = sorted(deduped_reviews, key=_recent_sort_key, reverse=True)[:limit]
+            def _recent_sort_key(item):
+                status = str(item.get('status') or '')
+                if status == 'pending':
+                    days_to_expiry = item.get('days_to_expiry')
+                    if days_to_expiry is None:
+                        expiry_dt = _parse_dt(item.get('expiry_date') or '')
+                        if expiry_dt != datetime.min:
+                            days_to_expiry = int((expiry_dt.date() - today).days)
+                        else:
+                            days_to_expiry = 10**9
+                    created_dt = _parse_dt(item.get('reviewed_at') or '')
+                    # pending 优先；到期更近优先（已过期值更小会排在最前）；同日按创建时间倒序
+                    return (0, int(days_to_expiry), -created_dt.timestamp() if created_dt != datetime.min else float('inf'))
+
+                reviewed_dt = _parse_dt(item.get('reviewed_at') or '')
+                if reviewed_dt == datetime.min:
+                    reviewed_dt = _parse_dt(item.get('expiry_date') or '')
+                # reviewed 在 pending 之后，按复盘时间倒序
+                return (1, 0, -reviewed_dt.timestamp() if reviewed_dt != datetime.min else float('inf'))
+
+            reviews_list = sorted(deduped_reviews, key=_recent_sort_key)[:limit]
             
             session.close()
             

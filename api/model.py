@@ -8,6 +8,7 @@ import os
 import json
 import pickle
 import hashlib
+import time
 import subprocess
 import threading
 import numpy as np
@@ -15,6 +16,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from flask import jsonify, request, send_file
 from werkzeug.utils import secure_filename
+from sqlalchemy import func, case
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,6 +26,66 @@ from api.auth import require_admin_access, log_admin_audit
 
 logger = get_logger(__name__)
 TRAINING_PROGRESS_FILE = Path(__file__).resolve().parent.parent / 'data' / 'models' / 'training_progress.json'
+_MODEL_PICKLE_PAYLOAD_CACHE = {}
+_MODEL_PARAMS_JSON_CACHE = {}
+_REVIEW_COVERAGE_CACHE = {
+    'ts': 0.0,
+    'value': None,
+}
+_REVIEW_COVERAGE_CACHE_LOCK = threading.Lock()
+_REVIEW_COVERAGE_CACHE_TTL_SECONDS = 20.0
+_DUE_REVIEW_SYNC_STATE = {
+    'last_run_ts': 0.0,
+}
+_DUE_REVIEW_SYNC_LOCK = threading.Lock()
+_DUE_REVIEW_SYNC_MIN_INTERVAL_SECONDS = 30.0
+_MODEL_STATUS_SNAPSHOT_CACHE = {
+    'ts': 0.0,
+    'key': None,
+    'value': None,
+}
+_MODEL_STATUS_SNAPSHOT_LOCK = threading.Lock()
+_MODEL_STATUS_SNAPSHOT_TTL_SECONDS = 10.0
+
+
+def _load_pickle_payload_cached(path):
+    try:
+        candidate = Path(path)
+        if not candidate.exists() or not candidate.is_file():
+            return None
+        resolved = str(candidate.resolve())
+        mtime = candidate.stat().st_mtime
+        cached = _MODEL_PICKLE_PAYLOAD_CACHE.get(resolved)
+        if isinstance(cached, dict) and cached.get('mtime') == mtime:
+            return cached.get('payload')
+
+        with open(candidate, 'rb') as f:
+            payload = pickle.load(f)
+        _MODEL_PICKLE_PAYLOAD_CACHE[resolved] = {
+            'mtime': mtime,
+            'payload': payload,
+        }
+        return payload
+    except Exception:
+        return None
+
+
+def _resolve_project_python(project_root=None):
+    root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent
+    candidates = []
+    if os.name == 'nt':
+        candidates.append(root / '.venv' / 'Scripts' / 'python.exe')
+    else:
+        candidates.append(root / '.venv' / 'bin' / 'python')
+    candidates.append(Path(sys.executable))
+
+    for candidate in candidates:
+        try:
+            if candidate and candidate.exists() and candidate.is_file():
+                return str(candidate)
+        except Exception:
+            continue
+    return sys.executable
 
 
 def _is_pid_alive(pid):
@@ -31,8 +93,21 @@ def _is_pid_alive(pid):
         pid_val = int(pid)
         if pid_val <= 0:
             return False
-        os.kill(pid_val, 0)
-        return True
+        import sys
+        if sys.platform == 'win32':
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_val)
+            if not handle:
+                return False
+            import ctypes.wintypes
+            exit_code = ctypes.wintypes.DWORD()
+            alive = bool(ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)))
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return alive and exit_code.value == 259  # STILL_ACTIVE = 259
+        else:
+            os.kill(pid_val, 0)
+            return True
     except Exception:
         return False
 
@@ -133,9 +208,16 @@ def _load_model_metadata(model_record):
     try:
         raw_params = getattr(model_record, 'params', None)
         if raw_params:
-            parsed = json.loads(raw_params)
-            if isinstance(parsed, dict):
-                metadata.update(parsed)
+            model_id = getattr(model_record, 'id', None)
+            cache_key = f"{model_id}:{hash(raw_params)}"
+            cached = _MODEL_PARAMS_JSON_CACHE.get(cache_key)
+            if isinstance(cached, dict):
+                metadata.update(cached)
+            else:
+                parsed = json.loads(raw_params)
+                if isinstance(parsed, dict):
+                    metadata.update(parsed)
+                    _MODEL_PARAMS_JSON_CACHE[cache_key] = dict(parsed)
     except Exception:
         pass
 
@@ -145,11 +227,9 @@ def _load_model_metadata(model_record):
             candidate = Path(model_path)
             if not candidate.is_absolute():
                 candidate = Path(__file__).resolve().parent.parent / candidate
-            if candidate.exists() and candidate.is_file():
-                with open(candidate, 'rb') as f:
-                    payload = pickle.load(f)
-                if isinstance(payload, dict) and isinstance(payload.get('metadata'), dict):
-                    metadata.update(payload.get('metadata') or {})
+            payload = _load_pickle_payload_cached(candidate)
+            if isinstance(payload, dict) and isinstance(payload.get('metadata'), dict):
+                metadata.update(payload.get('metadata') or {})
         except Exception:
             pass
 
@@ -202,9 +282,27 @@ def _build_review_coverage_summary(session):
         from api.reviews import _prediction_has_real_price_source
 
         today = get_today()
-        total = int(session.query(Prediction).count())
-        reviewed = int(session.query(Prediction).filter(Prediction.is_direction_correct.isnot(None)).count())
+        total_row = session.query(
+            func.count(Prediction.id),
+            func.sum(case((Prediction.is_direction_correct.isnot(None), 1), else_=0)),
+        ).one()
+        total = int(total_row[0] or 0)
+        reviewed = int(total_row[1] or 0)
         pending = max(total - reviewed, 0)
+
+        period_total_rows = session.query(
+            Prediction.period_days,
+            func.count(Prediction.id)
+        ).group_by(Prediction.period_days).all()
+        period_reviewed_rows = session.query(
+            Prediction.period_days,
+            func.count(Prediction.id)
+        ).filter(
+            Prediction.is_direction_correct.isnot(None)
+        ).group_by(Prediction.period_days).all()
+
+        period_total_map = {int(period or 0): int(cnt or 0) for period, cnt in period_total_rows}
+        period_reviewed_map = {int(period or 0): int(cnt or 0) for period, cnt in period_reviewed_rows}
 
         due_predictions = session.query(Prediction).filter(Prediction.expiry_date <= today).all()
         reviewed_due = sum(1 for item in due_predictions if item.is_direction_correct is not None)
@@ -226,16 +324,38 @@ def _build_review_coverage_summary(session):
         eligible_due = len(eligible_predictions)
         eligible_reviewed = sum(1 for item in eligible_predictions if item.is_direction_correct is not None)
 
+        due_period_map = {5: {'due': 0, 'reviewed_due': 0}, 20: {'due': 0, 'reviewed_due': 0}, 60: {'due': 0, 'reviewed_due': 0}}
+        for item in due_predictions:
+            try:
+                p = int(item.period_days or 0)
+            except Exception:
+                continue
+            if p not in due_period_map:
+                continue
+            due_period_map[p]['due'] += 1
+            if item.is_direction_correct is not None:
+                due_period_map[p]['reviewed_due'] += 1
+
+        eligible_period_map = {5: {'eligible_due': 0, 'eligible_reviewed': 0}, 20: {'eligible_due': 0, 'eligible_reviewed': 0}, 60: {'eligible_due': 0, 'eligible_reviewed': 0}}
+        for item in eligible_predictions:
+            try:
+                p = int(item.period_days or 0)
+            except Exception:
+                continue
+            if p not in eligible_period_map:
+                continue
+            eligible_period_map[p]['eligible_due'] += 1
+            if item.is_direction_correct is not None:
+                eligible_period_map[p]['eligible_reviewed'] += 1
+
         by_period = {}
         for period in (5, 20, 60):
-            p_total = int(session.query(Prediction).filter(Prediction.period_days == period).count())
-            p_reviewed = int(session.query(Prediction).filter(Prediction.period_days == period, Prediction.is_direction_correct.isnot(None)).count())
-            p_due_items = [item for item in due_predictions if int(item.period_days or 0) == period]
-            p_due = len(p_due_items)
-            p_reviewed_due = sum(1 for item in p_due_items if item.is_direction_correct is not None)
-            p_eligible_items = [item for item in eligible_predictions if int(item.period_days or 0) == period]
-            p_eligible_due = len(p_eligible_items)
-            p_eligible_reviewed = sum(1 for item in p_eligible_items if item.is_direction_correct is not None)
+            p_total = int(period_total_map.get(period, 0))
+            p_reviewed = int(period_reviewed_map.get(period, 0))
+            p_due = int(due_period_map.get(period, {}).get('due', 0))
+            p_reviewed_due = int(due_period_map.get(period, {}).get('reviewed_due', 0))
+            p_eligible_due = int(eligible_period_map.get(period, {}).get('eligible_due', 0))
+            p_eligible_reviewed = int(eligible_period_map.get(period, {}).get('eligible_reviewed', 0))
 
             if p_due <= 0:
                 maturity_status = 'pending'
@@ -295,6 +415,196 @@ def _build_review_coverage_summary(session):
             'status': 'thin',
             'by_period': empty_by_period,
         }
+
+
+def _get_cached_review_coverage_summary(session):
+    now_ts = datetime.now().timestamp()
+    try:
+        with _REVIEW_COVERAGE_CACHE_LOCK:
+            cached_ts = float(_REVIEW_COVERAGE_CACHE.get('ts') or 0.0)
+            cached_value = _REVIEW_COVERAGE_CACHE.get('value')
+            if cached_value is not None and (now_ts - cached_ts) <= _REVIEW_COVERAGE_CACHE_TTL_SECONDS:
+                return cached_value
+    except Exception:
+        pass
+
+    fresh_value = _build_review_coverage_summary(session)
+    try:
+        with _REVIEW_COVERAGE_CACHE_LOCK:
+            _REVIEW_COVERAGE_CACHE['ts'] = now_ts
+            _REVIEW_COVERAGE_CACHE['value'] = fresh_value
+    except Exception:
+        pass
+    return fresh_value
+
+
+def _sync_due_reviews_throttled():
+    now_ts = time.time()
+    should_run = False
+    try:
+        with _DUE_REVIEW_SYNC_LOCK:
+            last_run_ts = float(_DUE_REVIEW_SYNC_STATE.get('last_run_ts') or 0.0)
+            if (now_ts - last_run_ts) >= _DUE_REVIEW_SYNC_MIN_INTERVAL_SECONDS:
+                _DUE_REVIEW_SYNC_STATE['last_run_ts'] = now_ts
+                should_run = True
+    except Exception:
+        should_run = True
+
+    if not should_run:
+        return
+
+    try:
+        from api.reviews import _ensure_due_reviews_current
+        _ensure_due_reviews_current(force=True)
+    except Exception:
+        pass
+
+
+def _build_model_status_snapshot_key(all_versions, runtime_metadata_map, asset_training_results, current_model):
+    first_id = None
+    first_train_date = None
+    if all_versions:
+        first = all_versions[0]
+        first_id = getattr(first, 'id', None)
+        first_train_date = str(getattr(first, 'train_date', None) or '')
+
+    runtime_sig = tuple(
+        (int(period), str((meta or {}).get('version') or ''), str((meta or {}).get('train_date') or ''))
+        for period, meta in sorted((runtime_metadata_map or {}).items(), key=lambda x: int(x[0]))
+    )
+
+    asset_sig = tuple(
+        (str(item.get('asset_type') or ''), int(item.get('period_days') or 0), str(item.get('version') or ''), str(item.get('train_date') or ''))
+        for item in (asset_training_results or [])
+    )
+
+    current_id = getattr(current_model, 'id', None) if current_model is not None else None
+    return (
+        len(all_versions or []),
+        first_id,
+        first_train_date,
+        current_id,
+        runtime_sig,
+        asset_sig,
+    )
+
+
+def _build_model_status_snapshot(all_versions, runtime_metadata_map, asset_training_results, current_model, session):
+    accuracy_trend = []
+    recent_versions = []
+    for v in all_versions:
+        meta = _load_model_metadata(v)
+        acc_pct = _metric_pct(meta.get('validation_accuracy'))
+        f1_pct = _metric_pct(meta.get('validation_f1'))
+        auc_pct = _metric_pct(meta.get('validation_auc'))
+        brier = _metric_num(meta.get('validation_brier'))
+        asset_type = meta.get('asset_type') or 'a_stock'
+        asset_label = ASSET_LABEL_MAP.get(asset_type, str(asset_type or '未知资产'))
+
+        trend_date = v.train_date.isoformat() if v.train_date else None
+        accuracy_trend.append({
+            'version': f"{v.version} · {v.period_days}日",
+            'asset_type': asset_type,
+            'asset_label': asset_label,
+            'accuracy': acc_pct or 0,
+            'period_days': v.period_days,
+            'train_date': trend_date,
+            'day_label': str(v.train_date.day) if v.train_date else '--',
+        })
+        recent_versions.append({
+            'version': v.version,
+            'model_type': v.model_type,
+            'asset_type': asset_type,
+            'period_days': v.period_days,
+            'train_date': v.train_date.isoformat() if v.train_date else None,
+            'validation_accuracy': acc_pct,
+            'validation_f1': f1_pct,
+            'validation_auc': auc_pct,
+            'validation_brier': brier,
+            'train_data_count': meta.get('train_data_count') or v.train_data_count,
+            'is_active': bool(v.is_active),
+            'is_current': False,
+        })
+
+    period_comparison = _build_period_comparison(recent_versions, runtime_metadata_map)
+    runtime_versions_summary, current_period_versions = _build_current_runtime_summary(recent_versions, runtime_metadata_map)
+    asset_runtime_summary, current_period_versions = _merge_asset_runtime_versions(asset_training_results, current_period_versions)
+    if asset_runtime_summary:
+        runtime_versions_summary = asset_runtime_summary
+    for item in recent_versions:
+        period = int(item.get('period_days') or 0)
+        item['is_current'] = current_period_versions.get(period) == item.get('version')
+
+    feature_importance = _load_feature_importance_for_display(current_model)
+
+    latest_train_dt = None
+    for candidate in [
+        current_model.train_date if current_model else None,
+        *[_parse_datetime_value(item.get('train_date')) for item in asset_training_results],
+    ]:
+        parsed = _parse_datetime_value(candidate)
+        if parsed and (latest_train_dt is None or parsed > latest_train_dt):
+            latest_train_dt = parsed
+
+    review_coverage = _get_cached_review_coverage_summary(session)
+    asset_training_summary = {
+        'total_models': len(asset_training_results),
+        'healthy_models': sum(1 for item in asset_training_results if item.get('status') == 'healthy'),
+        'latest_train_date': latest_train_dt.isoformat() if latest_train_dt else None,
+        'asset_categories': len({item.get('asset_type') for item in asset_training_results if item.get('asset_type')}),
+        'reviewed_predictions': review_coverage.get('reviewed_predictions', 0),
+        'total_predictions': review_coverage.get('total_predictions', 0),
+        'review_coverage_pct': review_coverage.get('coverage_pct', 0.0),
+        'due_predictions': review_coverage.get('due_predictions', 0),
+        'reviewed_due_predictions': review_coverage.get('reviewed_due_predictions', 0),
+        'due_coverage_pct': review_coverage.get('due_coverage_pct', 0.0),
+        'eligible_due_predictions': review_coverage.get('eligible_due_predictions', 0),
+        'eligible_reviewed_predictions': review_coverage.get('eligible_reviewed_predictions', 0),
+        'eligible_due_coverage_pct': review_coverage.get('eligible_due_coverage_pct', 0.0),
+        'review_status': review_coverage.get('status', 'thin'),
+    }
+
+    return {
+        'runtime_versions_summary': runtime_versions_summary,
+        'current_period_versions': current_period_versions,
+        'asset_runtime_summary': bool(asset_runtime_summary),
+        'latest_train_dt': latest_train_dt,
+        'accuracy_trend': accuracy_trend,
+        'recent_versions': recent_versions,
+        'feature_importance': feature_importance,
+        'period_comparison': period_comparison,
+        'review_coverage': review_coverage,
+        'asset_training_summary': asset_training_summary,
+    }
+
+
+def _get_model_status_snapshot(all_versions, runtime_metadata_map, asset_training_results, current_model, session):
+    now_ts = time.time()
+    cache_key = _build_model_status_snapshot_key(all_versions, runtime_metadata_map, asset_training_results, current_model)
+
+    try:
+        with _MODEL_STATUS_SNAPSHOT_LOCK:
+            cached_ts = float(_MODEL_STATUS_SNAPSHOT_CACHE.get('ts') or 0.0)
+            cached_key = _MODEL_STATUS_SNAPSHOT_CACHE.get('key')
+            cached_value = _MODEL_STATUS_SNAPSHOT_CACHE.get('value')
+            if (
+                cached_value is not None
+                and cached_key == cache_key
+                and (now_ts - cached_ts) <= _MODEL_STATUS_SNAPSHOT_TTL_SECONDS
+            ):
+                return cached_value
+    except Exception:
+        pass
+
+    fresh_value = _build_model_status_snapshot(all_versions, runtime_metadata_map, asset_training_results, current_model, session)
+    try:
+        with _MODEL_STATUS_SNAPSHOT_LOCK:
+            _MODEL_STATUS_SNAPSHOT_CACHE['ts'] = now_ts
+            _MODEL_STATUS_SNAPSHOT_CACHE['key'] = cache_key
+            _MODEL_STATUS_SNAPSHOT_CACHE['value'] = fresh_value
+    except Exception:
+        pass
+    return fresh_value
 
 
 def _metric_pct(value, digits=2):
@@ -473,10 +783,9 @@ def _load_feature_importance_for_display(current_model=None):
 
     if current_model is not None:
         try:
-            raw_params = getattr(current_model, 'params', None)
-            if raw_params:
-                parsed = json.loads(raw_params)
-                data = _extract_feature_importance_from_payload({'metadata': parsed})
+            metadata = _load_model_metadata(current_model)
+            if isinstance(metadata, dict) and metadata:
+                data = _extract_feature_importance_from_payload({'metadata': metadata})
                 if data:
                     return data
         except Exception:
@@ -497,8 +806,9 @@ def _load_feature_importance_for_display(current_model=None):
             if key in seen or (not path.exists()) or (not path.is_file()):
                 continue
             seen.add(key)
-            with open(path, 'rb') as f:
-                payload = pickle.load(f)
+            payload = _load_pickle_payload_cached(path)
+            if payload is None:
+                continue
             data = _extract_feature_importance_from_payload(payload)
             if data:
                 return data
@@ -554,10 +864,8 @@ def _load_asset_training_results(model_dir=None):
         if not path.exists() or not path.is_file():
             continue
 
-        try:
-            with open(path, 'rb') as f:
-                payload = pickle.load(f)
-        except Exception:
+        payload = _load_pickle_payload_cached(path)
+        if payload is None:
             continue
 
         metadata = _extract_payload_metadata(payload, fallback_period_days=default_period)
@@ -722,7 +1030,8 @@ def _build_training_launch_config(project_root, asset_type=None, period_days=Non
         if normalized_period not in (5, 20, 60):
             raise ValueError('仅支持 5/20/60 日模型训练')
 
-    cmd = [sys.executable, '-u', str(script_path)]
+    python_executable = _resolve_project_python(project_root)
+    cmd = [python_executable, '-u', str(script_path)]
     total_steps = 7
     task_name = 'full_asset_training'
     current_asset = '准备启动'
@@ -731,6 +1040,7 @@ def _build_training_launch_config(project_root, asset_type=None, period_days=Non
     if normalized_asset:
         asset_label = ASSET_LABEL_MAP.get(normalized_asset, normalized_asset)
         cmd.extend(['--only', normalized_asset])
+        cmd.append('--disable-self-optimization')
         total_steps = 1
         current_asset = asset_label
         task_name = f'{normalized_asset}_training'
@@ -743,6 +1053,7 @@ def _build_training_launch_config(project_root, asset_type=None, period_days=Non
 
     return {
         'command': cmd,
+        'python_executable': python_executable,
         'script_path': script_path,
         'total_steps': total_steps,
         'task_name': task_name,
@@ -756,6 +1067,8 @@ def _build_training_launch_config(project_root, asset_type=None, period_days=Non
 def _build_period_comparison(version_rows, runtime_metadata_map=None):
     grouped = {}
     for row in version_rows or []:
+        if str(row.get('asset_type') or '') != 'a_stock':
+            continue
         grouped.setdefault(row.get('period_days'), []).append(row)
 
     runtime_metadata_map = runtime_metadata_map or {}
@@ -826,8 +1139,9 @@ def _load_runtime_metadata_map():
     for period_days, path in runtime_files.items():
         try:
             if path.exists() and path.is_file():
-                with open(path, 'rb') as f:
-                    payload = pickle.load(f)
+                payload = _load_pickle_payload_cached(path)
+                if payload is None:
+                    continue
                 runtime_meta = _extract_payload_metadata(payload, fallback_period_days=period_days)
                 if runtime_meta:
                     runtime_map[int(period_days)] = runtime_meta
@@ -842,12 +1156,12 @@ def register_model_routes(app):
     @app.route('/api/model/status', methods=['GET'])
     def get_model_status():
         """获取模型状态"""
+        session = None
+        t0 = time.perf_counter()
+        perf = {}
         try:
-            try:
-                from api.reviews import _ensure_due_reviews_current
-                _ensure_due_reviews_current(force=True)
-            except Exception:
-                pass
+            _sync_due_reviews_throttled()
+            perf['sync_due_reviews_ms'] = round((time.perf_counter() - t0) * 1000, 2)
 
             session = get_session()
 
@@ -856,88 +1170,37 @@ def register_model_routes(app):
                 ModelVersion.created_at.desc()
             ).limit(200).all()
             current_model, current_version_source = _select_current_model_version(all_versions)
+            perf['load_versions_ms'] = round((time.perf_counter() - t0) * 1000, 2)
 
             runtime_metadata_map = _load_runtime_metadata_map()
             asset_training_results = _load_asset_training_results()
             training_progress = _load_training_progress()
-            accuracy_trend = []
-            recent_versions = []
-            for v in all_versions:
-                meta = _load_model_metadata(v)
-                acc_pct = _metric_pct(meta.get('validation_accuracy'))
-                f1_pct = _metric_pct(meta.get('validation_f1'))
-                auc_pct = _metric_pct(meta.get('validation_auc'))
-                brier = _metric_num(meta.get('validation_brier'))
-                asset_type = meta.get('asset_type') or 'a_stock'
-                asset_label = ASSET_LABEL_MAP.get(asset_type, str(asset_type or '未知资产'))
-
-                trend_date = v.train_date.isoformat() if v.train_date else None
-                accuracy_trend.append({
-                    'version': f"{v.version} · {v.period_days}日",
-                    'asset_type': asset_type,
-                    'asset_label': asset_label,
-                    'accuracy': acc_pct or 0,
-                    'period_days': v.period_days,
-                    'train_date': trend_date,
-                    'day_label': str(v.train_date.day) if v.train_date else '--',
-                })
-                recent_versions.append({
-                    'version': v.version,
-                    'model_type': v.model_type,
-                    'period_days': v.period_days,
-                    'train_date': v.train_date.isoformat() if v.train_date else None,
-                    'validation_accuracy': acc_pct,
-                    'validation_f1': f1_pct,
-                    'validation_auc': auc_pct,
-                    'validation_brier': brier,
-                    'train_data_count': meta.get('train_data_count') or v.train_data_count,
-                    'is_active': bool(v.is_active),
-                    'is_current': False,
-                })
-            period_comparison = _build_period_comparison(recent_versions, runtime_metadata_map)
-            runtime_versions_summary, current_period_versions = _build_current_runtime_summary(recent_versions, runtime_metadata_map)
-            asset_runtime_summary, current_period_versions = _merge_asset_runtime_versions(asset_training_results, current_period_versions)
-            if asset_runtime_summary:
-                runtime_versions_summary = asset_runtime_summary
-            for item in recent_versions:
-                period = int(item.get('period_days') or 0)
-                item['is_current'] = current_period_versions.get(period) == item.get('version')
-
-            feature_importance = _load_feature_importance_for_display(current_model)
-
-            latest_train_dt = None
-            for candidate in [
-                current_model.train_date if current_model else None,
-                *[_parse_datetime_value(item.get('train_date')) for item in asset_training_results],
-            ]:
-                parsed = _parse_datetime_value(candidate)
-                if parsed and (latest_train_dt is None or parsed > latest_train_dt):
-                    latest_train_dt = parsed
-
-            review_coverage = _build_review_coverage_summary(session)
-
-            asset_training_summary = {
-                'total_models': len(asset_training_results),
-                'healthy_models': sum(1 for item in asset_training_results if item.get('status') == 'healthy'),
-                'latest_train_date': latest_train_dt.isoformat() if latest_train_dt else None,
-                'asset_categories': len({item.get('asset_type') for item in asset_training_results if item.get('asset_type')}),
-                'reviewed_predictions': review_coverage.get('reviewed_predictions', 0),
-                'total_predictions': review_coverage.get('total_predictions', 0),
-                'review_coverage_pct': review_coverage.get('coverage_pct', 0.0),
-                'due_predictions': review_coverage.get('due_predictions', 0),
-                'reviewed_due_predictions': review_coverage.get('reviewed_due_predictions', 0),
-                'due_coverage_pct': review_coverage.get('due_coverage_pct', 0.0),
-                'eligible_due_predictions': review_coverage.get('eligible_due_predictions', 0),
-                'eligible_reviewed_predictions': review_coverage.get('eligible_reviewed_predictions', 0),
-                'eligible_due_coverage_pct': review_coverage.get('eligible_due_coverage_pct', 0.0),
-                'review_status': review_coverage.get('status', 'thin'),
-            }
+            perf['load_runtime_ms'] = round((time.perf_counter() - t0) * 1000, 2)
+            snapshot = _get_model_status_snapshot(
+                all_versions=all_versions,
+                runtime_metadata_map=runtime_metadata_map,
+                asset_training_results=asset_training_results,
+                current_model=current_model,
+                session=session,
+            )
+            perf['build_version_rows_ms'] = round((time.perf_counter() - t0) * 1000, 2)
+            runtime_versions_summary = snapshot.get('runtime_versions_summary')
+            current_period_versions = snapshot.get('current_period_versions') or {}
+            asset_runtime_summary = bool(snapshot.get('asset_runtime_summary'))
+            latest_train_dt = snapshot.get('latest_train_dt')
+            accuracy_trend = snapshot.get('accuracy_trend') or []
+            recent_versions = snapshot.get('recent_versions') or []
+            feature_importance = snapshot.get('feature_importance') or []
+            period_comparison = snapshot.get('period_comparison') or []
+            review_coverage = snapshot.get('review_coverage') or {}
+            asset_training_summary = snapshot.get('asset_training_summary') or {}
+            perf['build_comparison_ms'] = round((time.perf_counter() - t0) * 1000, 2)
+            perf['review_coverage_ms'] = round((time.perf_counter() - t0) * 1000, 2)
 
             # 当前表结构未存储完整混淆矩阵与误差分布，避免返回伪造数据。
             confusion_matrix = None
             error_distribution = []
-            
-            session.close()
+            perf['total_ms'] = round((time.perf_counter() - t0) * 1000, 2)
             
             return jsonify({
                 'code': 200,
@@ -963,7 +1226,8 @@ def register_model_routes(app):
                         'feature_importance': len(feature_importance) > 0,
                         'confusion_matrix': False,
                         'error_distribution': False,
-                    }
+                    },
+                    'performance_breakdown_ms': perf,
                 },
                 'timestamp': datetime.now().isoformat()
             })
@@ -976,6 +1240,9 @@ def register_model_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session is not None:
+                session.close()
     
     @app.route('/api/model/train', methods=['POST'])
     @require_admin_access(action='model.train')
@@ -1022,15 +1289,15 @@ def register_model_routes(app):
             log_path.parent.mkdir(parents=True, exist_ok=True)
             env = dict(os.environ)
             env['PYTHONUNBUFFERED'] = '1'
-            with open(log_path, 'a', encoding='utf-8', buffering=1) as log_file:
-                process = subprocess.Popen(
-                    launch_config['command'],
-                    cwd=str(project_root),
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    env=env,
-                )
+            env['TRAINING_LOG_FILE'] = str(log_path)
+            process = subprocess.Popen(
+                launch_config['command'],
+                cwd=str(project_root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+            )
 
             TRAINING_PROGRESS_FILE.write_text(json.dumps({
                 'status': 'running',

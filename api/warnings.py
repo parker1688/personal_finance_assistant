@@ -185,7 +185,10 @@ def _build_holding_paths(session):
             merged_holdings[key]['quantity'] += float(getattr(holding, 'quantity', 0.0) or 0.0)
             merged_holdings[key]['cost_amount'] += float(getattr(holding, 'cost_price', 0.0) or 0.0) * float(getattr(holding, 'quantity', 0.0) or 0.0)
 
+    holding_codes = [str(item.get('code') or '').strip() for item in merged_holdings.values() if str(item.get('code') or '').strip()]
+
     prediction_rows = session.query(Prediction).filter(
+        Prediction.code.in_(holding_codes) if holding_codes else False,
         Prediction.period_days.in_(horizons)
     ).order_by(Prediction.date.desc(), Prediction.created_at.desc()).all()
 
@@ -204,7 +207,9 @@ def _build_holding_paths(session):
         if key not in latest_prediction_map:
             latest_prediction_map[key] = pred
 
-    recommendation_rows = session.query(Recommendation).order_by(
+    recommendation_rows = session.query(Recommendation).filter(
+        Recommendation.code.in_(holding_codes) if holding_codes else False,
+    ).order_by(
         Recommendation.date.desc(), Recommendation.rank.asc()
     ).all()
     latest_recommendation_map = {}
@@ -307,11 +312,16 @@ def _build_holding_replays(session, limit=8):
                 'asset_type': asset_type,
             }
 
+    holding_codes = [str(item.get('code') or '').strip() for item in merged_holdings.values() if str(item.get('code') or '').strip()]
+
     prediction_rows = session.query(Prediction).filter(
+        Prediction.code.in_(holding_codes) if holding_codes else False,
         Prediction.period_days.in_(horizons)
     ).order_by(Prediction.date.desc(), Prediction.created_at.desc()).all()
 
-    recommendation_rows = session.query(Recommendation).order_by(
+    recommendation_rows = session.query(Recommendation).filter(
+        Recommendation.code.in_(holding_codes) if holding_codes else False,
+    ).order_by(
         Recommendation.date.desc(), Recommendation.rank.asc()
     ).all()
     latest_recommendation_map = {}
@@ -321,7 +331,10 @@ def _build_holding_replays(session, limit=8):
             continue
         latest_recommendation_map[normalized_code] = rec
 
-    review_rows = session.query(Review).order_by(Review.reviewed_at.desc()).all()
+    prediction_ids = [int(getattr(pred, 'id', 0) or 0) for pred in prediction_rows if getattr(pred, 'id', None)]
+    review_rows = session.query(Review).filter(
+        Review.prediction_id.in_(prediction_ids) if prediction_ids else False
+    ).order_by(Review.reviewed_at.desc()).all()
     review_by_prediction = {
         int(getattr(review, 'prediction_id', 0) or 0): review
         for review in review_rows

@@ -1017,14 +1017,20 @@ class StockRecommender:
         }
     
     def get_top_recommendations(self, market='A', limit=20):
+        market = str(market or 'A').upper()
         if market == 'A':
             stock_pool = self.a_stock_pool
         elif market == 'H':
             stock_pool = self.hk_stock_pool
         else:
             stock_pool = self.us_stock_pool
-        
-        eligible_codes = [code for code in stock_pool if self._has_sufficient_local_history(code, min_rows=60)]
+
+        eligible_code_set = self.collector.get_codes_with_min_history(market=market, min_rows=60)
+        if eligible_code_set:
+            eligible_codes = [code for code in stock_pool if str(code).strip().upper() in eligible_code_set]
+        else:
+            eligible_codes = [code for code in stock_pool if self._has_sufficient_local_history(code, min_rows=60)]
+
         if eligible_codes:
             logger.info(f"{market}市场可用推荐候选: {len(eligible_codes)}/{len(stock_pool)}")
         else:

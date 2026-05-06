@@ -70,7 +70,7 @@ for i in {1..10}; do
     sleep 1
     echo -n "."
     # 检查是否还有相关进程
-    if ! pgrep -f "python3 app.py" > /dev/null 2>&1; then
+    if ! pgrep -f "python.*app.py" > /dev/null 2>&1; then
         echo ""
         echo -e "${GREEN}✅ 所有进程已退出${NC}"
         break

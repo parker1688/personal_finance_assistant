@@ -6,6 +6,16 @@ data/database/*.db-shm
 # CSV 数据文件
 data/*.csv
 
+# 运行时 JSON 缓存
+data/*.json
+data/cache/*
+!data/cache/.gitkeep
+
+# 采集进度 & 报告 & 备份
+data/collect_progress/
+data/reports/
+data/backup/
+
 # 模型文件
 data/models/*.pkl
 data/models/*.json
@@ -14,8 +24,27 @@ data/models/*.json
 logs/
 *.log
 
+# 进程 / 临时输出
+*.pid
+app.pid
+test_output.txt
+
+# 根目录临时脚本（下划线前缀）
+_run_train_*.py
+_*.py
+
+# 临时测试脚本（非 tests/ 目录）
+test_optimization_quick.py
+test_optimized_training.py
+test_quick_validation.py
+
+# 调试脚本（下划线前缀）
+scripts/_*.py
+
 # Python
 __pycache__/
 *.pyc
-data/collect_progress/
+*.pyo
+.venv/
+venv/
 *.tar.gz

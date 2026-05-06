@@ -335,11 +335,14 @@ class ModelTrainer:
 
         macro_cpi = self._safe_read_csv_flexible(os.path.join(data_dir, 'macro_cpi.csv'))
         if not macro_cpi.empty and 'month' in macro_cpi.columns:
-            macro_cpi['trade_date'] = pd.to_datetime(macro_cpi['month'], format='%Y%m', errors='coerce')
+            # 兼容两种日期格式：%Y%m（如202603）和 %Y-%m-%d（如2026-03-01）
+            _cp = pd.to_datetime(macro_cpi['month'], format='%Y%m', errors='coerce')
+            _cf = pd.to_datetime(macro_cpi['month'], errors='coerce')
+            macro_cpi['trade_date'] = _cp.where(_cp.notna(), _cf)
             cpi_col = 'nt_yoy' if 'nt_yoy' in macro_cpi.columns else ('cnt_yoy' if 'cnt_yoy' in macro_cpi.columns else None)
             if cpi_col is not None:
                 macro_cpi['cpi_yoy'] = pd.to_numeric(macro_cpi[cpi_col], errors='coerce')
-                macro_cpi = macro_cpi.dropna(subset=['trade_date']).sort_values('trade_date').reset_index(drop=True)
+                macro_cpi = macro_cpi.dropna(subset=['trade_date', 'cpi_yoy']).sort_values('trade_date').reset_index(drop=True)
                 macro_cpi = macro_cpi[['trade_date', 'cpi_yoy']]
             else:
                 macro_cpi = pd.DataFrame(columns=['trade_date', 'cpi_yoy'])
@@ -349,15 +352,21 @@ class ModelTrainer:
         macro_pmi = self._safe_read_csv_flexible(os.path.join(data_dir, 'macro_pmi.csv'))
         if not macro_pmi.empty and ('MONTH' in macro_pmi.columns or 'month' in macro_pmi.columns):
             month_col = 'MONTH' if 'MONTH' in macro_pmi.columns else 'month'
-            macro_pmi['trade_date'] = pd.to_datetime(macro_pmi[month_col], format='%Y%m', errors='coerce')
+            # 兼容两种日期格式：%Y%m（如202603）和 %Y-%m-%d
+            _parsed = pd.to_datetime(macro_pmi[month_col], format='%Y%m', errors='coerce')
+            _fallback = pd.to_datetime(macro_pmi[month_col], errors='coerce')
+            macro_pmi['trade_date'] = _parsed.where(_parsed.notna(), _fallback)
+            # 兼容多种PMI列名：标准NBS列 + TuShare列 + 备用manufacturing_pmi列
             pmi_col = None
-            for cand in ['PMI010000', 'PMI010100', 'PMI010400']:
+            for cand in ['PMI010000', 'PMI010100', 'PMI010400', 'manufacturing_pmi']:
                 if cand in macro_pmi.columns:
-                    pmi_col = cand
-                    break
+                    _test = pd.to_numeric(macro_pmi[cand], errors='coerce').dropna()
+                    if not _test.empty:
+                        pmi_col = cand
+                        break
             if pmi_col is not None:
                 macro_pmi['pmi'] = pd.to_numeric(macro_pmi[pmi_col], errors='coerce')
-                macro_pmi = macro_pmi.dropna(subset=['trade_date']).sort_values('trade_date').reset_index(drop=True)
+                macro_pmi = macro_pmi.dropna(subset=['trade_date', 'pmi']).sort_values('trade_date').reset_index(drop=True)
                 macro_pmi = macro_pmi[['trade_date', 'pmi']]
             else:
                 macro_pmi = pd.DataFrame(columns=['trade_date', 'pmi'])
@@ -374,7 +383,7 @@ class ModelTrainer:
         else:
             macro_shibor = pd.DataFrame(columns=['trade_date', 'shibor_1m', 'shibor_3m'])
 
-        # 宏观CSV为空时，降级为最新实时快照，避免训练侧特征全为0。
+        # 宏观CSV为空时，依次降级：实时快照 → 硬编码合理默认值，避免训练侧特征全为0。
         if macro_cpi.empty or macro_pmi.empty or macro_shibor.empty:
             mc = MacroCollector()
             anchor_day = pd.Timestamp('2000-01-01')
@@ -386,6 +395,8 @@ class ModelTrainer:
                     macro_cpi = pd.DataFrame([{'trade_date': anchor_day, 'cpi_yoy': cpi_val}])
                 except Exception as e:
                     logger.warning(f"CPI实时快照降级失败: {e}")
+                    # 最终兜底：使用近期合理默认值（国内CPI同比约1%左右）
+                    macro_cpi = pd.DataFrame([{'trade_date': anchor_day, 'cpi_yoy': 1.0}])
 
             if macro_pmi.empty:
                 try:
@@ -394,6 +405,8 @@ class ModelTrainer:
                     macro_pmi = pd.DataFrame([{'trade_date': anchor_day, 'pmi': pmi_val}])
                 except Exception as e:
                     logger.warning(f"PMI实时快照降级失败: {e}")
+                    # 最终兜底：PMI荣枯线中性值50.0
+                    macro_pmi = pd.DataFrame([{'trade_date': anchor_day, 'pmi': 50.0}])
 
             if macro_shibor.empty:
                 try:
@@ -403,6 +416,8 @@ class ModelTrainer:
                     macro_shibor = pd.DataFrame([{'trade_date': anchor_day, 'shibor_1m': s1m, 'shibor_3m': s3m}])
                 except Exception as e:
                     logger.warning(f"Shibor实时快照降级失败: {e}")
+                    # 最终兜底：近期1M Shibor约1.42%，3M约1.44%
+                    macro_shibor = pd.DataFrame([{'trade_date': anchor_day, 'shibor_1m': 1.42, 'shibor_3m': 1.44}])
 
         cross_asset = self._load_cross_asset_features(data_dir)
 
@@ -996,15 +1011,52 @@ class ModelTrainer:
             return X, y, pd.DataFrame(meta_rows)
         return X, y
 
-    def _time_based_split(self, X, y, meta_df, split_ratio=MODEL_TRAIN_TEST_SPLIT):
-        """按样本时间切分训练/验证集，降低时间泄漏风险。"""
+    def _time_based_split(self, X, y, meta_df, split_ratio=MODEL_TRAIN_TEST_SPLIT, 
+                         strict_val_start_date=None, strict_val_end_date=None):
+        """
+        按样本时间切分训练/验证集，降低时间泄漏风险。
+        
+        Args:
+            split_ratio: 松散模式下的切分比例 (default 0.8)
+            strict_val_start_date: 严格模式 - 验证集起始日期 (e.g., '2026-05-01')
+            strict_val_end_date: 严格模式 - 验证集结束日期 (e.g., '2026-06-30')
+        
+        返回: (X_train, X_val, y_train, y_val, cutoff_date)
+        """
         if meta_df is None or meta_df.empty or 'asof_date' not in meta_df.columns:
             split_idx = int(len(X) * split_ratio)
             return X[:split_idx], X[split_idx:], y[:split_idx], y[split_idx:], None
 
         meta_df = meta_df.reset_index(drop=True)
-        cutoff_date = meta_df['asof_date'].sort_values().iloc[int(len(meta_df) * split_ratio)]
-        train_mask = meta_df['asof_date'] <= cutoff_date
+        
+        # 严格验证模式：按日期范围切分
+        if strict_val_start_date is not None and strict_val_end_date is not None:
+            start_dt = pd.to_datetime(strict_val_start_date)
+            end_dt = pd.to_datetime(strict_val_end_date)
+            
+            val_mask = (meta_df['asof_date'] >= start_dt) & (meta_df['asof_date'] <= end_dt)
+            train_mask = ~val_mask
+            
+            # 严格模式下必须命中验证样本，避免静默退化为松散验证
+            if train_mask.all() or val_mask.all():
+                available_min = meta_df['asof_date'].min()
+                available_max = meta_df['asof_date'].max()
+                raise ValueError(
+                    f"严格验证日期范围无可用样本: [{strict_val_start_date}, {strict_val_end_date}]。"
+                    f"当前样本日期覆盖范围: [{available_min}, {available_max}]。"
+                    "请调整验证区间。"
+                )
+            else:
+                cutoff_date = start_dt
+                logger.info(
+                    f"严格验证模式: 训练集={train_mask.sum()}样本 ({meta_df[train_mask]['asof_date'].min()} 至 {meta_df[train_mask]['asof_date'].max()}), "
+                    f"验证集={val_mask.sum()}样本 ({start_dt} 至 {end_dt})"
+                )
+        else:
+            # 松散验证模式：80%-20% 时间切分
+            cutoff_date = meta_df['asof_date'].sort_values().iloc[int(len(meta_df) * split_ratio)]
+            train_mask = meta_df['asof_date'] <= cutoff_date
+            val_mask = ~train_mask
 
         # 保证验证集非空
         if train_mask.all() or (~train_mask).all():
@@ -1086,8 +1138,15 @@ class ModelTrainer:
 
         return metrics
 
-    def _find_best_threshold(self, y_true, y_proba, min_threshold=0.30, max_threshold=0.70, step=0.01):
-        """在验证集上搜索兼顾F1、平衡准确率与误报约束的最优阈值。"""
+    def _find_best_threshold(self, y_true, y_proba, min_threshold=0.30, max_threshold=0.70, step=0.01, business_mode='balanced'):
+        """
+        在验证集上搜索兼顾F1、平衡准确率与误报约束的最优阈值。
+        
+        Args:
+            business_mode: 'balanced'(默认，兼顾精度和召回)
+                         'precision'(优先避免假正，推荐质量为主)
+                         'recall'(优先发现机会，宽松推荐)
+        """
         if y_proba is None or len(y_true) == 0:
             return 0.5, None
 
@@ -1097,6 +1156,41 @@ class ModelTrainer:
         best_t = 0.5
         best_score = -1e9
         thresholds = np.arange(min_threshold, max_threshold + 1e-9, step)
+        
+        # 根据业务场景调整权重
+        if business_mode == 'precision':
+            # 优先避免假正：推荐质量为主，宁可漏掉机会
+            weights = {
+                'f1': 0.20,
+                'balanced_accuracy': 0.15,
+                'precision': 0.35,  # 精度权重最高
+                'accuracy': 0.10,
+                'recall': 0.05,
+                'rate_gap': -0.20,
+                'false_positive_rate': -0.25  # 严厉惩罚假正
+            }
+        elif business_mode == 'recall':
+            # 优先发现机会：宽松推荐，容许一些垃圾
+            weights = {
+                'f1': 0.30,
+                'balanced_accuracy': 0.20,
+                'precision': 0.10,
+                'accuracy': 0.15,
+                'recall': 0.20,  # 召回权重较高
+                'rate_gap': -0.10,
+                'false_positive_rate': -0.05  # 容许较多假正
+            }
+        else:  # 'balanced'
+            # 平衡模式（现有方式）
+            weights = {
+                'f1': 0.30,
+                'balanced_accuracy': 0.25,
+                'precision': 0.20,
+                'accuracy': 0.15,
+                'recall': 0.10,
+                'rate_gap': -0.20,
+                'false_positive_rate': -0.15
+            }
 
         for t in thresholds:
             y_pred = (p_arr >= t).astype(int)
@@ -1105,13 +1199,13 @@ class ModelTrainer:
             bias = self._summarize_prediction_bias(y_true_arr, y_pred)
 
             score = (
-                (0.30 * f1)
-                + (0.25 * bias['balanced_accuracy'])
-                + (0.20 * bias['precision'])
-                + (0.15 * acc)
-                + (0.10 * bias['recall'])
-                - (0.20 * bias['rate_gap'])
-                - (0.15 * bias['false_positive_rate'])
+                (weights['f1'] * f1)
+                + (weights['balanced_accuracy'] * bias['balanced_accuracy'])
+                + (weights['precision'] * bias['precision'])
+                + (weights['accuracy'] * acc)
+                + (weights['recall'] * bias['recall'])
+                + (weights['rate_gap'] * bias['rate_gap'])
+                + (weights['false_positive_rate'] * bias['false_positive_rate'])
             )
 
             if (score > best_score + 1e-12) or (abs(score - best_score) <= 1e-12 and float(t) > best_t):
@@ -2307,6 +2401,8 @@ class ModelTrainer:
             'metrics': {
                 'accuracy': round(acc, 6),
                 'f1': round(f1, 6),
+                'precision': round(float(eval_metrics.get('precision') or 0.0), 6),
+                'recall': round(float(eval_metrics.get('recall') or 0.0), 6),
                 'auc': round(auc, 6) if eval_metrics.get('auc') is not None else None,
                 'brier': round(brier, 6) if eval_metrics.get('brier') is not None else None,
             },
@@ -2644,6 +2740,10 @@ class ModelTrainer:
             {'name': 'adaptive_label_1.0pct_q18_l14', 'lookback_years': 1.4, 'neutral_zone': 0.010, 'decay_days': 60.0, 'adaptive_band': True, 'adaptive_band_quantile': 0.18, 'adaptive_label_zone': True},
             {'name': 'event_enhanced_q18', 'lookback_years': 1.2, 'neutral_zone': 0.010, 'decay_days': 55.0, 'adaptive_band': True, 'adaptive_band_quantile': 0.18, 'use_event_features': True},
             {'name': 'event_adaptive_label_q18', 'lookback_years': 1.2, 'neutral_zone': 0.010, 'decay_days': 55.0, 'adaptive_band': True, 'adaptive_band_quantile': 0.18, 'adaptive_label_zone': True, 'use_event_features': True},
+            # 更强的中性区：过滤±1.5%震荡样本，提升标签区分度，改善precision
+            {'name': 'strong_neutral_1.5pct_q18', 'lookback_years': 1.2, 'neutral_zone': 0.015, 'decay_days': 55.0, 'adaptive_band': True, 'adaptive_band_quantile': 0.18, 'adaptive_label_zone': True, 'use_event_features': True},
+            {'name': 'strong_neutral_1.5pct_q20', 'lookback_years': 1.2, 'neutral_zone': 0.015, 'decay_days': 60.0, 'adaptive_band': True, 'adaptive_band_quantile': 0.20, 'adaptive_label_zone': True, 'use_event_features': True},
+            {'name': 'strong_neutral_2.0pct_q18', 'lookback_years': 1.5, 'neutral_zone': 0.020, 'decay_days': 65.0, 'adaptive_band': True, 'adaptive_band_quantile': 0.18, 'adaptive_label_zone': True, 'use_event_features': True},
         ]
 
         candidate_params, experiment_grid = self._merge_short_term_search_plan(
@@ -2682,15 +2782,25 @@ class ModelTrainer:
                 else:
                     experiment_grid = experiment_grid[:2]
             else:
-                experiment_grid = [exp for exp in experiment_grid if exp.get('name') == 'event_adaptive_label_q18']
+                # full_data_mode 默认只运行最优单实验，避免重复跑多套实验
+                event_exp = [exp for exp in experiment_grid if exp.get('name') == 'event_adaptive_label_q18']
+                experiment_grid = event_exp if event_exp else experiment_grid[:1]
 
         return candidate_params, experiment_grid
 
-    def train_short_term_model(self, stock_codes=None, plan_override=None, round_idx=None, max_rounds=None):
+    def train_short_term_model(self, stock_codes=None, plan_override=None, round_idx=None, max_rounds=None,
+                               strict_validation=False, strict_val_start_date=None, strict_val_end_date=None,
+                               strict_val_recent_days=20,
+                               business_mode='balanced'):
         """
         训练5日预测模型
         Args:
             stock_codes: 股票代码列表
+            strict_validation: 是否使用严格验证模式 (指定日期范围)
+            strict_val_start_date: 严格模式下的验证集起始日期
+            strict_val_end_date: 严格模式下的验证集结束日期
+            strict_val_recent_days: 严格模式未指定日期时，自动使用最近N天作为验证集
+            business_mode: 阈值选择模式 ('balanced'|'precision'|'recall')
         Returns:
             float: 训练准确率
         """
@@ -2698,6 +2808,10 @@ class ModelTrainer:
             stock_codes = self._get_default_training_codes(limit=None)
 
         logger.info("开始训练5日预测模型...")
+        if strict_validation and strict_val_start_date and strict_val_end_date:
+            logger.info(f"P0-1严格验证模式已启用: [{strict_val_start_date}, {strict_val_end_date}]")
+        if business_mode != 'balanced':
+            logger.info(f"业务化阈值模式: {business_mode} (P0-2改进)")
         if round_idx is not None and max_rounds is not None:
             logger.info(f"5日训练-反思优化轮次: {int(round_idx)}/{int(max_rounds)}")
         if plan_override and plan_override.get('notes'):
@@ -2775,8 +2889,43 @@ class ModelTrainer:
                 if macro_coverage:
                     data_profile['macro_feature_coverage'] = macro_coverage
 
-            X_train, X_val, y_train, y_val, cutoff_date = self._time_based_split(X, y, meta_df)
-            if cutoff_date is not None and meta_df is not None and 'asof_date' in meta_df.columns:
+            # 调用 _time_based_split 时，传入严格验证参数
+            effective_strict_start = strict_val_start_date
+            effective_strict_end = strict_val_end_date
+            if strict_validation and (effective_strict_start is None or effective_strict_end is None):
+                if meta_df is None or meta_df.empty or 'asof_date' not in meta_df.columns:
+                    raise ValueError("严格验证模式启用失败: 样本元数据为空，无法自动推断验证区间")
+
+                date_series = pd.to_datetime(meta_df['asof_date'], errors='coerce').dropna()
+                if date_series.empty:
+                    raise ValueError("严格验证模式启用失败: asof_date无有效日期，无法自动推断验证区间")
+
+                max_dt = date_series.max()
+                min_dt = date_series.min()
+                days = max(int(strict_val_recent_days or 20), 1)
+                start_dt = max_dt - pd.Timedelta(days=days - 1)
+                if start_dt < min_dt:
+                    start_dt = min_dt
+
+                effective_strict_start = start_dt.strftime('%Y-%m-%d')
+                effective_strict_end = max_dt.strftime('%Y-%m-%d')
+                logger.info(
+                    f"严格验证自动区间: [{effective_strict_start}, {effective_strict_end}] "
+                    f"(recent_days={days})"
+                )
+
+            X_train, X_val, y_train, y_val, cutoff_date = self._time_based_split(
+                X, y, meta_df,
+                strict_val_start_date=effective_strict_start if strict_validation else None,
+                strict_val_end_date=effective_strict_end if strict_validation else None
+            )
+            # 严格验证模式下，用与 _time_based_split 相同的掩码逻辑定义 meta_val 和 train_mask
+            if strict_validation and effective_strict_start and effective_strict_end and meta_df is not None and 'asof_date' in meta_df.columns:
+                _sv_s = pd.to_datetime(effective_strict_start)
+                _sv_e = pd.to_datetime(effective_strict_end)
+                _val_mask_strict = (meta_df['asof_date'] >= _sv_s) & (meta_df['asof_date'] <= _sv_e)
+                meta_val = meta_df.loc[_val_mask_strict.values].reset_index(drop=True)
+            elif cutoff_date is not None and meta_df is not None and 'asof_date' in meta_df.columns:
                 meta_val = meta_df.loc[(meta_df['asof_date'] > cutoff_date).values].reset_index(drop=True)
             else:
                 meta_val = meta_df.iloc[len(X_train):].reset_index(drop=True) if meta_df is not None else None
@@ -2789,8 +2938,19 @@ class ModelTrainer:
             asset_weight = None
             move_neutral_band = max(float(exp.get('neutral_zone', 0.0)), 0.003)
             train_dates_for_group = None
-            if cutoff_date is not None and meta_df is not None and 'asof_date' in meta_df.columns:
+            # 确定训练集掩码（严格验证/松散验证/兜底三种情况）
+            _use_train_mask = False
+            train_mask = None
+            if strict_validation and effective_strict_start and effective_strict_end and meta_df is not None and 'asof_date' in meta_df.columns:
+                _sv_s = pd.to_datetime(effective_strict_start)
+                _sv_e = pd.to_datetime(effective_strict_end)
+                train_mask = ~((meta_df['asof_date'] >= _sv_s) & (meta_df['asof_date'] <= _sv_e))
+                _use_train_mask = True
+            elif cutoff_date is not None and meta_df is not None and 'asof_date' in meta_df.columns:
                 train_mask = meta_df['asof_date'] <= cutoff_date
+                _use_train_mask = True
+            # 统一权重计算（使用 train_mask，保证与 X_train 严格对齐）
+            if _use_train_mask and train_mask is not None and meta_df is not None and 'asof_date' in meta_df.columns:
                 train_dates = meta_df.loc[train_mask.values, 'asof_date']
                 train_dates_for_group = train_dates
                 recency_weight = self._build_recency_weights(train_dates, decay_days=exp['decay_days'])
@@ -2998,7 +3158,7 @@ class ModelTrainer:
                                     continue
 
                             eval_proba = self._apply_probability_calibrator(cal_method, calibrator, p_eval)
-                            best_threshold, _ = self._find_best_threshold(y_eval, eval_proba)
+                            best_threshold, _ = self._find_best_threshold(y_eval, eval_proba, business_mode=business_mode)
                             eval_pred = (eval_proba >= best_threshold).astype(int)
                             eval_metrics = self._evaluate_binary(y_eval, eval_pred, eval_proba)
 
@@ -3094,7 +3254,7 @@ class ModelTrainer:
                                         continue
 
                                 eval_proba = self._apply_probability_calibrator(cal_method, calibrator, p_eval)
-                                best_threshold, _ = self._find_best_threshold(y_eval, eval_proba)
+                                best_threshold, _ = self._find_best_threshold(y_eval, eval_proba, business_mode=business_mode)
                                 eval_pred = (eval_proba >= best_threshold).astype(int)
                                 eval_metrics = self._evaluate_binary(y_eval, eval_pred, eval_proba)
                                 failure_analysis = self._analyze_failure_factors(meta_eval, y_eval, eval_pred, eval_proba, period_days=5)
@@ -3377,6 +3537,97 @@ class ModelTrainer:
             status=status,
         )
         return best_result
+
+    def run_walkforward_validation(self, stock_codes=None, n_windows=6, window_days=30):
+        """
+        多月滑动窗口验证：在现有数据上对最近 N 个月分别做严格验证，
+        汇报每月的 AUC / Precision / Recall，评估模型跨时间稳定性。
+
+        Args:
+            stock_codes: 股票代码列表（默认使用全量）
+            n_windows: 验证窗口数量（默认6，即最近6个月）
+            window_days: 每个验证窗口的天数（默认30天）
+
+        Returns:
+            dict: {
+                'windows': [{'val_start', 'val_end', 'auc', 'precision', 'recall', 'f1', 'accuracy', 'n_val', 'passed'}],
+                'summary': {'auc_mean', 'auc_std', 'precision_mean', 'recall_mean', 'f1_mean', 'pass_rate'}
+            }
+        """
+        if stock_codes is None:
+            stock_codes = self._get_default_training_codes(limit=None)
+
+        # 推断数据最新日期
+        cache = self._load_external_feature_cache()
+        try:
+            all_dates = []
+            for code_data in list(self._external_feature_cache.get('daily_basic_by_code', {}).values())[:100]:
+                if code_data is not None and not code_data.empty and 'trade_date' in code_data.columns:
+                    all_dates.extend(pd.to_datetime(code_data['trade_date'], errors='coerce').dropna().tolist())
+            data_end = max(all_dates).date() if all_dates else datetime.now().date()
+        except Exception:
+            data_end = datetime.now().date()
+
+        windows = []
+        for i in range(n_windows - 1, -1, -1):
+            val_end = data_end - timedelta(days=i * window_days)
+            val_start = val_end - timedelta(days=window_days - 1)
+            windows.append((val_start.strftime('%Y-%m-%d'), val_end.strftime('%Y-%m-%d')))
+
+        logger.info(f"Walk-forward验证: {n_windows}个窗口, 每窗口{window_days}天")
+
+        results = []
+        for idx, (val_start, val_end) in enumerate(windows):
+            logger.info(f"Walk-forward窗口 [{idx+1}/{n_windows}]: {val_start} ~ {val_end}")
+            try:
+                acc = self.train_short_term_model(
+                    stock_codes=stock_codes,
+                    strict_validation=True,
+                    strict_val_start_date=val_start,
+                    strict_val_end_date=val_end,
+                    business_mode='precision',
+                )
+                diag = self._last_training_diagnostics.get('short_term', {})
+                m = diag.get('metrics', {})
+                results.append({
+                    'val_start': val_start,
+                    'val_end': val_end,
+                    'auc': m.get('auc'),
+                    'precision': m.get('precision'),
+                    'recall': m.get('recall'),
+                    'f1': m.get('f1'),
+                    'accuracy': m.get('accuracy'),
+                    'n_val': diag.get('n_val'),
+                    'passed': diag.get('passed'),
+                })
+            except ValueError as e:
+                logger.warning(f"Walk-forward窗口 {val_start}~{val_end} 跳过: {e}")
+                results.append({
+                    'val_start': val_start, 'val_end': val_end,
+                    'auc': None, 'precision': None, 'recall': None,
+                    'f1': None, 'accuracy': None, 'n_val': 0, 'passed': None,
+                    'skip_reason': str(e),
+                })
+
+        # 汇总有效窗口
+        valid = [r for r in results if r.get('auc') is not None]
+        summary = {}
+        if valid:
+            for key in ('auc', 'precision', 'recall', 'f1', 'accuracy'):
+                vals = [r[key] for r in valid if r.get(key) is not None]
+                summary[f'{key}_mean'] = float(np.mean(vals)) if vals else None
+                summary[f'{key}_std'] = float(np.std(vals)) if len(vals) > 1 else None
+            summary['pass_rate'] = sum(1 for r in valid if r.get('passed')) / len(valid)
+            summary['n_valid_windows'] = len(valid)
+            logger.info(
+                f"Walk-forward汇总({len(valid)}/{n_windows}窗口有效): "
+                f"AUC={summary['auc_mean']:.4f}±{summary.get('auc_std', 0):.4f}, "
+                f"Precision={summary['precision_mean']:.4f}, "
+                f"Recall={summary['recall_mean']:.4f}, "
+                f"通过率={summary['pass_rate']:.0%}"
+            )
+
+        return {'windows': results, 'summary': summary}
 
     def train_medium_term_until_target(self, stock_codes=None, target_accuracy=0.55, target_f1=0.5, max_rounds=4):
         """20日模型训练后立即复盘并继续自动优化，直到达到目标或达到最大轮次。"""

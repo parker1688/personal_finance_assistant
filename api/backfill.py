@@ -6,6 +6,8 @@
 import sys
 import os
 import threading
+import warnings
+import queue
 from datetime import datetime, timedelta
 import pandas as pd
 from flask import jsonify, request
@@ -20,6 +22,9 @@ from utils import get_logger
 from api.auth import require_admin_access, log_admin_audit
 
 logger = get_logger(__name__)
+
+
+BACKFILL_STEP_TIMEOUT_SECONDS = max(60, int(os.environ.get('BACKFILL_STEP_TIMEOUT_SECONDS', '1200')))
 
 
 def _get_project_data_dir():
@@ -390,7 +395,11 @@ def _run_single_dataset_collect(collect_key):
 
     try:
         _update_backfill_step(step_name, 'running', f'正在执行 {label} 单项采集')
-        result = spec['runner']()
+        result = _run_collect_runner_with_timeout(
+            spec['runner'],
+            label=label,
+            timeout_seconds=_get_collect_step_timeout_seconds(collect_key),
+        )
         message = _summarize_collection_result(result)
         _update_backfill_step(step_name, 'success', f'{label} 已完成：{message}')
     except Exception as e:
@@ -409,6 +418,51 @@ def _start_single_dataset_collect_async(collect_key):
     )
     t.start()
     logger.info(f'已启动单项补采线程: {collect_key}')
+
+
+def _get_collect_step_timeout_seconds(collect_key):
+    collect_key = str(collect_key or '').strip()
+    heavy_steps = {
+        'stock_realtime_snapshot',
+        'historical_a_stock',
+        'historical_hk_stock',
+        'historical_us_stock',
+        'fund_nav',
+        'historical_etf',
+        'precious_metals',
+        'gold_prices',
+        'silver_prices',
+    }
+    if collect_key in heavy_steps:
+        return max(BACKFILL_STEP_TIMEOUT_SECONDS, 1800)
+    return BACKFILL_STEP_TIMEOUT_SECONDS
+
+
+def _run_collect_runner_with_timeout(runner, label, timeout_seconds=None):
+    timeout = int(timeout_seconds or BACKFILL_STEP_TIMEOUT_SECONDS)
+    done = queue.Queue(maxsize=1)
+
+    def _target():
+        try:
+            done.put(('ok', runner()))
+        except Exception as e:
+            done.put(('error', e))
+
+    worker = threading.Thread(
+        target=_target,
+        daemon=True,
+        name=f"collect_runner_{str(label or 'step')[:32]}",
+    )
+    worker.start()
+
+    try:
+        state, payload = done.get(timeout=timeout)
+    except queue.Empty:
+        raise TimeoutError(f'{label} 执行超时（>{timeout} 秒）')
+
+    if state == 'error':
+        raise payload
+    return payload
 
 
 def _get_scheduler_core():
@@ -652,7 +706,8 @@ def _safe_csv_profile(path):
         return profile
 
     try:
-        df = pd.read_csv(path)
+        # 以字符串读取可避免 code 列 mixed-type 警告，统计用途不依赖数值类型。
+        df = pd.read_csv(path, dtype=str, low_memory=False)
         profile['row_count'] = int(len(df))
 
         for code_col in ['ts_code', 'code', 'symbol']:
@@ -662,7 +717,28 @@ def _safe_csv_profile(path):
 
         for date_col in ['trade_date', 'date', 'datetime', 'month', 'ann_date', 'publish_date']:
             if date_col in df.columns:
-                series = pd.to_datetime(df[date_col].astype(str), errors='coerce').dropna()
+                raw_series = df[date_col].astype(str).str.strip()
+                parsed = pd.Series(pd.NaT, index=raw_series.index)
+
+                # 先处理纯8位日期（YYYYMMDD），再回退通用解析，减少逐元素推断警告。
+                mask_ymd8 = raw_series.str.fullmatch(r'\d{8}', na=False)
+                if mask_ymd8.any():
+                    parsed.loc[mask_ymd8] = pd.to_datetime(
+                        raw_series.loc[mask_ymd8], format='%Y%m%d', errors='coerce'
+                    )
+
+                if (~mask_ymd8).any():
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            'ignore',
+                            message='Could not infer format, so each element will be parsed individually.*',
+                            category=UserWarning,
+                        )
+                        parsed.loc[~mask_ymd8] = pd.to_datetime(
+                            raw_series.loc[~mask_ymd8], errors='coerce'
+                        )
+
+                series = parsed.dropna()
                 if len(series) > 0:
                     profile['latest_data_time'] = series.max().strftime('%Y-%m-%d %H:%M:%S')
                 break
@@ -775,51 +851,52 @@ def _build_dataset_inventory():
     session = get_session()
     data_dir = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / 'data'
     try:
+        def _db_profile(model, created_col, date_col):
+            row = session.query(
+                func.count(model.id),
+                func.max(created_col),
+                func.max(date_col),
+            ).one()
+            row_count = int(row[0] or 0)
+            latest_update = _format_latest_update(row[1] or row[2])
+            return row_count, latest_update
+
+        stock_count, stock_latest = _db_profile(RawStockData, RawStockData.created_at, RawStockData.date)
+        fund_count, fund_latest = _db_profile(RawFundData, RawFundData.created_at, RawFundData.date)
+        daily_price_count, daily_price_latest = _db_profile(DailyPrice, DailyPrice.created_at, DailyPrice.date)
+        recommendation_count, recommendation_latest = _db_profile(Recommendation, Recommendation.created_at, Recommendation.date)
+        prediction_count, prediction_latest = _db_profile(Prediction, Prediction.created_at, Prediction.date)
+
         inventories = [
             {
                 'name': '股票原始行情',
                 'category': '数据库',
-                'row_count': int(session.query(RawStockData).count()),
-                'latest_update': _format_latest_update(
-                    session.query(func.max(RawStockData.created_at)).scalar()
-                    or session.query(func.max(RawStockData.date)).scalar()
-                ),
+                'row_count': stock_count,
+                'latest_update': stock_latest,
             },
             {
                 'name': '基金净值数据',
                 'category': '数据库',
-                'row_count': int(session.query(RawFundData).count()),
-                'latest_update': _format_latest_update(
-                    session.query(func.max(RawFundData.created_at)).scalar()
-                    or session.query(func.max(RawFundData.date)).scalar()
-                ),
+                'row_count': fund_count,
+                'latest_update': fund_latest,
             },
             {
                 'name': '统一日价格表',
                 'category': '数据库',
-                'row_count': int(session.query(DailyPrice).count()),
-                'latest_update': _format_latest_update(
-                    session.query(func.max(DailyPrice.created_at)).scalar()
-                    or session.query(func.max(DailyPrice.date)).scalar()
-                ),
+                'row_count': daily_price_count,
+                'latest_update': daily_price_latest,
             },
             {
                 'name': '投资推荐结果',
                 'category': '数据库',
-                'row_count': int(session.query(Recommendation).count()),
-                'latest_update': _format_latest_update(
-                    session.query(func.max(Recommendation.created_at)).scalar()
-                    or session.query(func.max(Recommendation.date)).scalar()
-                ),
+                'row_count': recommendation_count,
+                'latest_update': recommendation_latest,
             },
             {
                 'name': '预测记录',
                 'category': '数据库',
-                'row_count': int(session.query(Prediction).count()),
-                'latest_update': _format_latest_update(
-                    session.query(func.max(Prediction.created_at)).scalar()
-                    or session.query(func.max(Prediction.date)).scalar()
-                ),
+                'row_count': prediction_count,
+                'latest_update': prediction_latest,
             },
         ]
 
@@ -948,7 +1025,11 @@ def _run_missing_only_backfill():
                 spec = collect_specs.get(collect_key)
                 if not spec or not callable(spec.get('runner')):
                     raise RuntimeError(f'未找到补采器: {collect_key}')
-                result = spec['runner']()
+                result = _run_collect_runner_with_timeout(
+                    spec['runner'],
+                    label=item.get('label') or collect_key,
+                    timeout_seconds=_get_collect_step_timeout_seconds(collect_key),
+                )
                 message = _summarize_collection_result(result)
                 _update_backfill_step(step_name, 'success', f"已完成 {step_name}：{message}")
             except Exception as step_err:
@@ -1140,6 +1221,58 @@ def register_backfill_routes(app):
             })
         except Exception as e:
             logger.error(f"重试补采步骤失败: {e}")
+            return jsonify({
+                'code': 500,
+                'status': 'error',
+                'message': str(e),
+                'timestamp': datetime.now().isoformat()
+            }), 500
+
+    @app.route('/api/backfill/force-finish', methods=['POST'])
+    @require_admin_access(action='backfill.force_finish')
+    def force_finish_backfill_api():
+        """强制结束当前补采进度（用于处理外部源导致的卡死步骤）。"""
+        try:
+            from scheduler import get_auto_backfill_progress
+
+            scheduler_core = _get_scheduler_core()
+            progress = get_auto_backfill_progress()
+            if not progress.get('running'):
+                return jsonify({
+                    'code': 200,
+                    'status': 'success',
+                    'message': '当前没有运行中的补采任务',
+                    'timestamp': datetime.now().isoformat()
+                })
+
+            current_step = str(progress.get('current_step') or '').strip()
+            update_step = getattr(scheduler_core, '_update_backfill_step', None)
+            finish_progress = getattr(scheduler_core, '_finish_backfill_progress', None)
+
+            if callable(update_step) and current_step:
+                update_step(
+                    current_step,
+                    'failed',
+                    '已手动强制结束当前补采任务',
+                    'force_finish_by_admin',
+                )
+
+            if callable(finish_progress):
+                finish_progress()
+
+            log_admin_audit('backfill.force_finish', 'success', f'current_step={current_step}')
+            return jsonify({
+                'code': 200,
+                'status': 'success',
+                'message': f'已强制结束补采任务（步骤: {current_step or "unknown"}）',
+                'data': {
+                    'current_step': current_step,
+                    'timeout_seconds': int(BACKFILL_STEP_TIMEOUT_SECONDS),
+                },
+                'timestamp': datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"强制结束补采任务失败: {e}")
             return jsonify({
                 'code': 500,
                 'status': 'error',

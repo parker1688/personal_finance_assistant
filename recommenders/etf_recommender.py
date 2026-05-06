@@ -8,6 +8,9 @@ import os
 from datetime import datetime
 
 import yfinance as yf
+import pandas as pd
+import numpy as np
+import pickle
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,9 +27,196 @@ class ETFRecommender(BaseRecommender):
         super().__init__()
         self.etf_pool = self._get_etf_pool()
         self._market_signals = None  # 延迟加载
+        self._ml_model = None
+        self._ml_scaler = None
+        self._ml_feature_cols = None
+        self._ml_calibrator = None
+        self._ml_calibration_method = 'none'
+        self._ml_model_loaded = False
+        self._etf_tech_cache = {}   # code -> tech snapshot dict
 
     def get_asset_type(self):
         return "etf"
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ML 模型接入 (etf_short_term_model.pkl)
+    # ──────────────────────────────────────────────────────────────────────
+    def _load_etf_ml_model(self):
+        """延迟加载ETF模型，只加载一次；优先短期模型，失败时回退默认模型。"""
+        if self._ml_model_loaded:
+            return self._ml_model is not None
+        self._ml_model_loaded = True
+        try:
+            models_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'models'
+            )
+            candidates = [
+                'etf_short_term_model.pkl',
+                'etf_model.pkl',
+                'etf_medium_term_model.pkl',
+            ]
+            for filename in candidates:
+                model_path = os.path.join(models_dir, filename)
+                if not os.path.exists(model_path):
+                    continue
+                with open(model_path, 'rb') as f:
+                    payload = pickle.load(f)
+                passed_flag = payload.get('validation_passed')
+                if passed_flag is None and isinstance(payload.get('metadata'), dict):
+                    passed_flag = payload.get('metadata', {}).get('validation_passed')
+                if passed_flag is False:
+                    logger.warning(f'{filename} 未通过validation gate，跳过加载')
+                    continue
+                self._ml_model = payload.get('model')
+                self._ml_scaler = payload.get('scaler')
+                self._ml_feature_cols = payload.get('feature_columns', [])
+                self._ml_calibrator = payload.get('calibrator')
+                self._ml_calibration_method = str(payload.get('calibration_method', 'none') or 'none')
+                logger.info(
+                    f'{filename} 已加载: {len(self._ml_feature_cols)} 特征, '
+                    f'val_acc={payload.get("val_accuracy")}, cal={self._ml_calibration_method}'
+                )
+                return True
+
+            logger.warning('ETF可用模型不存在或均未通过validation gate，ML评分将跳过')
+            return False
+        except Exception as e:
+            logger.warning(f'etf_short_term_model.pkl 加载失败: {e}')
+            return False
+
+    def _apply_probability_calibrator(self, prob):
+        p = float(prob)
+        if self._ml_calibrator is None or self._ml_calibration_method == 'none':
+            return max(0.0, min(1.0, p))
+        try:
+            if self._ml_calibration_method == 'platt':
+                p = float(self._ml_calibrator.predict_proba(np.array([[p]], dtype=float))[0][1])
+            elif self._ml_calibration_method == 'isotonic':
+                p = float(self._ml_calibrator.predict(np.array([p], dtype=float))[0])
+        except Exception:
+            pass
+        return max(0.0, min(1.0, p))
+
+    def _compute_etf_tech_snapshot(self, code):
+        """从 data/historical_etf.csv 计算单只 ETF 的技术指标快照。"""
+        if code in self._etf_tech_cache:
+            return self._etf_tech_cache[code]
+        snap = {
+            'rsi': 50.0, 'macd_hist': 0.0,
+            'price_ma5_ratio': 1.0, 'price_ma20_ratio': 1.0, 'price_ma60_ratio': 1.0,
+            'return_5d': 0.0, 'return_10d': 0.0, 'return_20d': 0.0,
+            'volatility_10d': 0.01, 'volatility_20d': 0.01,
+            'volume_ratio': 1.0,
+            'breakout_20d': 0.0, 'drawdown_20d': 0.0, 'up_days_ratio_20d': 0.5,
+        }
+        try:
+            csv_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'historical_etf.csv'
+            )
+            if not os.path.exists(csv_path):
+                self._etf_tech_cache[code] = snap
+                return snap
+            df = pd.read_csv(csv_path)
+            df = df[df['code'] == code].sort_values('date').reset_index(drop=True)
+            if len(df) < 65:
+                self._etf_tech_cache[code] = snap
+                return snap
+            close  = df['close'].values.astype(float)
+            high   = df['high'].values.astype(float)
+            low    = df['low'].values.astype(float)
+            volume = df['volume'].values.astype(float)
+            def safe_ret(n):
+                return (close[-1] - close[-n-1]) / close[-n-1] if close[-n-1] > 0 else 0.0
+            snap['return_5d']  = safe_ret(5)
+            snap['return_10d'] = safe_ret(10)
+            snap['return_20d'] = safe_ret(20)
+            snap['price_ma5_ratio']  = close[-1] / (np.mean(close[-5:])  or 1)
+            snap['price_ma20_ratio'] = close[-1] / (np.mean(close[-20:]) or 1)
+            snap['price_ma60_ratio'] = close[-1] / (np.mean(close[-60:]) or 1)
+            rets10 = np.diff(close[-11:]) / (close[-11:-1] + 1e-9)
+            rets20 = np.diff(close[-21:]) / (close[-21:-1] + 1e-9)
+            snap['volatility_10d'] = float(np.std(rets10) * np.sqrt(252)) if len(rets10) > 1 else 0.0
+            snap['volatility_20d'] = float(np.std(rets20) * np.sqrt(252)) if len(rets20) > 1 else 0.0
+            # RSI (14)
+            delta = np.diff(close[-15:])
+            gain  = np.where(delta > 0, delta, 0.0)
+            loss  = np.where(delta < 0, -delta, 0.0)
+            avg_g = np.mean(gain[-14:]) if len(gain) >= 14 else np.mean(gain)
+            avg_l = np.mean(loss[-14:]) if len(loss) >= 14 else np.mean(loss)
+            snap['rsi'] = 100.0 - 100.0 / (1.0 + avg_g / (avg_l + 1e-9))
+            # MACD Histogram
+            def ema(arr, n):
+                k = 2.0 / (n + 1); e = float(arr[0])
+                for v in arr[1:]: e = v * k + e * (1 - k)
+                return e
+            tail = close[-40:] if len(close) >= 40 else close
+            snap['macd_hist'] = (ema(tail, 12) - ema(tail, 26)) * 0.2
+            # Volume ratio (今日/20日均量)
+            vol20 = float(np.mean(volume[-20:])) if volume[-20:].any() else 0.0
+            snap['volume_ratio'] = float(volume[-1]) / (vol20 + 1e-9) if vol20 > 0 else 1.0
+            # Breakout (突破20日最高)
+            high20 = float(np.max(high[-20:]))
+            snap['breakout_20d'] = 1.0 if close[-1] > high20 * 0.98 else 0.0
+            # Drawdown (相对20日最高的回撤)
+            snap['drawdown_20d'] = (close[-1] - high20) / high20 if high20 > 0 else 0.0
+            # Up days ratio (20日内上涨天数比)
+            daily_rets = np.diff(close[-21:])
+            snap['up_days_ratio_20d'] = float(np.sum(daily_rets > 0)) / len(daily_rets) if len(daily_rets) > 0 else 0.5
+        except Exception as e:
+            logger.warning(f'ETF技术指标计算失败 {code}: {e}')
+        self._etf_tech_cache[code] = snap
+        return snap
+
+    def _build_etf_ml_features(self, etf):
+        """为单只 ETF 构建 18 维特征向量。"""
+        if not self._ml_feature_cols:
+            return None
+        code = etf['code']
+        etf_type = etf.get('type', '')
+        fee_bp = etf.get('fee', 0.15) * 100   # 0.15% → 15bp
+        tech = self._compute_etf_tech_snapshot(code)
+        row = {}
+        row['is_broad_index']   = 1.0 if etf_type == '宽基' else 0.0
+        row['is_sector_theme']  = 1.0 if etf_type == '行业' else 0.0
+        row['is_commodity']     = 1.0 if etf_type == '商品' else 0.0
+        row['expense_fee_bp']   = float(fee_bp)
+        for k in ['rsi', 'macd_hist', 'price_ma5_ratio', 'price_ma20_ratio',
+                  'price_ma60_ratio', 'return_5d', 'return_10d', 'return_20d',
+                  'volatility_10d', 'volatility_20d', 'volume_ratio',
+                  'breakout_20d', 'drawdown_20d', 'up_days_ratio_20d']:
+            row[k] = tech.get(k, 0.0)
+        vec = [row.get(col, 0.0) for col in self._ml_feature_cols]
+        return pd.DataFrame([vec], columns=self._ml_feature_cols)
+
+    def _ml_score_etf(self, etf):
+        """返回 ETF 短期上涨概率 [0,1]，失败时返回 None。"""
+        if not self._load_etf_ml_model():
+            return None
+        try:
+            X = self._build_etf_ml_features(etf)
+            if X is None:
+                return None
+            if self._ml_scaler is not None:
+                X_arr = self._ml_scaler.transform(X)
+            else:
+                X_arr = X.values
+            if hasattr(self._ml_model, 'predict_proba'):
+                prob = float(self._ml_model.predict_proba(X_arr)[0][1])
+            else:
+                prob = float(self._ml_model.predict(X_arr)[0])
+            return self._apply_probability_calibrator(prob)
+        except Exception as e:
+            logger.debug(f'ETF ML评分异常 {etf.get("code")}: {e}')
+            return None
+
+    def _fuse_etf_score(self, rule_score, ml_prob):
+        """规则评分 70% + ML 概率映射分 30%。"""
+        if ml_prob is None:
+            return rule_score
+        ml_score = 1.0 + ml_prob * 4.0
+        return max(1.0, min(5.0, round(0.7 * rule_score + 0.3 * ml_score, 2)))
 
     def _get_etf_pool(self):
         """ETF标的池（仅保留稳定静态属性: 代码/名称/类型/费率）"""
@@ -211,6 +401,8 @@ class ETFRecommender(BaseRecommender):
 
         for etf in self.etf_pool:
             score  = self._calculate_etf_score(etf, signals)
+            ml_prob = self._ml_score_etf(etf)
+            score   = self._fuse_etf_score(score, ml_prob)
             price  = signals['prices'].get(etf['code'])
             ret    = signals['returns'].get(etf['code'], {})
 
@@ -225,6 +417,8 @@ class ETFRecommender(BaseRecommender):
                 reasons.append(f"VIX={vix:.1f}利好避险")
             if not reasons:
                 reasons.append(f"费率{etf['fee']}%")
+            if ml_prob is not None:
+                reasons.append(f"ML短期上涨概率{ml_prob:.1%}")
 
             # 波动等级 — 基于20日实现波动(确定性)
             vol20d = ret.get('vol20d')
@@ -248,6 +442,7 @@ class ETFRecommender(BaseRecommender):
                 'reason_summary':  '; '.join(reasons),
                 'data_source':     'yfinance',
                 'update_time':     datetime.now().isoformat(),
+                'ml_score':        round(ml_prob, 4) if ml_prob is not None else None,
             })
 
         recommendations = self.sort_by_score(recommendations)

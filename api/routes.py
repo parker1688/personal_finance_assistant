@@ -24,6 +24,7 @@ def register_config_routes(app):
     @require_admin_access(action='config.read')
     def get_config():
         """获取系统配置"""
+        session = None
         try:
             session = get_session()
             configs = session.query(Config).all()
@@ -66,8 +67,6 @@ def register_config_routes(app):
                 }
             }
             
-            session.close()
-            
             return jsonify({
                 'code': 200,
                 'status': 'success',
@@ -83,11 +82,15 @@ def register_config_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session is not None:
+                session.close()
     
     @app.route('/api/config', methods=['POST'])
     @require_admin_access(action='config.write')
     def save_config():
         """保存系统配置"""
+        session = None
         try:
             data = request.get_json()
             session = get_session()
@@ -138,8 +141,6 @@ def register_config_routes(app):
                         session.add(config)
             
             session.commit()
-            session.close()
-            
             log_admin_audit('config.write', 'success', 'configuration_updated')
             return jsonify({
                 'code': 200,
@@ -149,6 +150,8 @@ def register_config_routes(app):
             })
             
         except Exception as e:
+            if session is not None:
+                session.rollback()
             logger.error(f"保存配置失败: {e}")
             return jsonify({
                 'code': 500,
@@ -156,6 +159,9 @@ def register_config_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session is not None:
+                session.close()
     
     @app.route('/api/config/test_push', methods=['POST'])
     @require_admin_access(action='config.test_push')

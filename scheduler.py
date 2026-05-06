@@ -152,6 +152,7 @@ _backfill_training_interval_days = 20
 _backfill_trade_chunk_days = max(1, int(os.environ.get('BACKFILL_TRADE_CHUNK_DAYS', '1')))
 _backfill_stage_retry_times = max(1, int(os.environ.get('BACKFILL_STAGE_RETRY_TIMES', '3')))
 TRAINING_PROGRESS_FILE = Path(MODELS_DIR) / 'training_progress.json'
+CONTINUOUS_LEARNING_PROGRESS_FILE = Path(MODELS_DIR) / 'continuous_learning_progress.json'
 LEARNING_STATUS_FILE = Path(DATA_DIR) / 'cache' / 'learning_loop_status.json'
 _continuous_learning_lock = threading.Lock()
 _continuous_learning_running = False
@@ -2485,6 +2486,7 @@ def run_continuous_learning_cycle(force: bool = False):
             stop_on_error=False,
             skip_existing=False,
             enable_self_optimization=False,
+            progress_file=CONTINUOUS_LEARNING_PROGRESS_FILE,
         )
         failed = [item for item in results if item.get('status') == 'failed']
         return {
@@ -2810,10 +2812,14 @@ def init_scheduler():
         except Exception as e:
             logger.warning(f"启动后预测补偿执行失败: {e}")
 
-        try:
-            ensure_data_inventory_current(force=False)
-        except Exception as e:
-            logger.warning(f"启动后数据补采检查失败: {e}")
+        auto_missing_backfill_on_startup = os.environ.get('AUTO_MISSING_BACKFILL_ON_STARTUP', 'false').lower() == 'true'
+        if auto_missing_backfill_on_startup:
+            try:
+                ensure_data_inventory_current(force=False)
+            except Exception as e:
+                logger.warning(f"启动后数据补采检查失败: {e}")
+        else:
+            logger.info("已跳过启动缺口补采检查（AUTO_MISSING_BACKFILL_ON_STARTUP=false）")
         
         # 注意：不在这里关闭资源，因为调度器需要这些对象在后台运行
         # collector, monitor, reviewer 会在后台线程中使用，不能关闭
@@ -3341,6 +3347,12 @@ def execute_managed_collection():
     - 采集编排优化
     """
     global _managed_collection_running
+
+    # 补采线程运行期间，跳过盘中/受管采集，避免并发写库导致长时间阻塞。
+    with _backfill_progress_lock:
+        if bool(_backfill_progress.get('running')):
+            logger.info("⏭️ 补采任务运行中，跳过本次受管采集")
+            return
 
     # 防止高频任务重入导致并发采集冲突。
     with _managed_collection_lock:

@@ -11,6 +11,7 @@ import time
 import sys
 import os
 from functools import lru_cache
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -100,39 +101,41 @@ class StockCollector:
     @staticmethod
     @lru_cache(maxsize=1)
     def _get_a_spot_snapshot():
+        """返回 {纯数字代码: row_dict} 映射，O(1) 查找"""
         try:
             import akshare as ak
             df = ak.stock_zh_a_spot_em()
-            return df if isinstance(df, pd.DataFrame) and not df.empty else pd.DataFrame()
+            if not isinstance(df, pd.DataFrame) or df.empty or '代码' not in df.columns:
+                return {}
+            df['_code_key'] = df['代码'].astype(str).str.strip()
+            return {row['_code_key']: row for _, row in df.iterrows()}
         except Exception:
-            return pd.DataFrame()
+            return {}
 
     def _collect_realtime_domestic(self, code, market='A'):
         normalized = self._normalize_domestic_code(code)
         base = normalized.split('.')[0]
 
-        spot_df = self._get_a_spot_snapshot()
-        if isinstance(spot_df, pd.DataFrame) and not spot_df.empty and '代码' in spot_df.columns:
-            matched = spot_df[spot_df['代码'].astype(str).str.strip() == base]
-            if not matched.empty:
-                row = matched.iloc[0]
-                close_price = pd.to_numeric(row.get('最新价'), errors='coerce')
-                if pd.notna(close_price):
-                    open_price = pd.to_numeric(row.get('今开', close_price), errors='coerce')
-                    high_price = pd.to_numeric(row.get('最高', close_price), errors='coerce')
-                    low_price = pd.to_numeric(row.get('最低', close_price), errors='coerce')
-                    volume = pd.to_numeric(row.get('成交量', 0), errors='coerce')
-                    return {
-                        'code': normalized,
-                        'name': str(row.get('名称') or base),
-                        'market': 'A',
-                        'date': datetime.now().date(),
-                        'open': float(open_price if pd.notna(open_price) else close_price),
-                        'high': float(high_price if pd.notna(high_price) else close_price),
-                        'low': float(low_price if pd.notna(low_price) else close_price),
-                        'close': float(close_price),
-                        'volume': int(volume if pd.notna(volume) else 0),
-                    }
+        spot_map = self._get_a_spot_snapshot()
+        if spot_map and base in spot_map:
+            row = spot_map[base]
+            close_price = pd.to_numeric(row.get('最新价'), errors='coerce')
+            if pd.notna(close_price):
+                open_price = pd.to_numeric(row.get('今开', close_price), errors='coerce')
+                high_price = pd.to_numeric(row.get('最高', close_price), errors='coerce')
+                low_price = pd.to_numeric(row.get('最低', close_price), errors='coerce')
+                volume = pd.to_numeric(row.get('成交量', 0), errors='coerce')
+                return {
+                    'code': normalized,
+                    'name': str(row.get('名称') or base),
+                    'market': 'A',
+                    'date': datetime.now().date(),
+                    'open': float(open_price if pd.notna(open_price) else close_price),
+                    'high': float(high_price if pd.notna(high_price) else close_price),
+                    'low': float(low_price if pd.notna(low_price) else close_price),
+                    'close': float(close_price),
+                    'volume': int(volume if pd.notna(volume) else 0),
+                }
 
         pro = get_tushare_pro()
         if pro is not None:
@@ -379,33 +382,129 @@ class StockCollector:
             logger.error(f"采集 {code} 历史数据失败: {e}")
             return None
     
+    # 实时快照最多采集的美股/港股数量，避免遍历数万只导致超时
+    _MAX_REALTIME_FOREIGN_STOCKS = 200
+
+    @staticmethod
+    def _yf_download_with_timeout(codes, timeout_seconds=45):
+        """在子线程中运行 yf.download，超时后返回 None"""
+        import threading
+        result = [None]
+        exc = [None]
+
+        def _run():
+            try:
+                result[0] = yf.download(
+                    codes,
+                    period='2d',
+                    interval='1d',
+                    progress=False,
+                    auto_adjust=True,
+                    threads=True,
+                )
+            except Exception as e:
+                exc[0] = e
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=timeout_seconds)
+        if t.is_alive():
+            return None  # 超时，放弃该批次
+        if exc[0]:
+            raise exc[0]
+        return result[0]
+
+    def _collect_foreign_realtime_batch(self, codes, market, batch_size=50):
+        """批量用 yf.download 拉取港股/美股最新一日行情，返回 list[dict]"""
+        results = []
+        today = datetime.now().date()
+        yf_codes = [self._normalize_symbol_for_yfinance(self._normalize_domestic_code(c)) for c in codes]
+
+        for i in range(0, len(yf_codes), batch_size):
+            batch_codes = yf_codes[i: i + batch_size]
+            orig_codes = codes[i: i + batch_size]
+            try:
+                df = self._yf_download_with_timeout(batch_codes, timeout_seconds=45)
+                if df is None or df.empty:
+                    continue
+                # yf.download 多标的时返回 MultiIndex columns (field, ticker)
+                if isinstance(df.columns, pd.MultiIndex):
+                    for orig_code, yf_code in zip(orig_codes, batch_codes):
+                        try:
+                            close_series = df['Close'][yf_code].dropna()
+                            if close_series.empty:
+                                continue
+                            last = close_series.iloc[-1]
+                            open_val = float(df['Open'][yf_code].iloc[-1]) if 'Open' in df.columns.get_level_values(0) else last
+                            high_val = float(df['High'][yf_code].iloc[-1]) if 'High' in df.columns.get_level_values(0) else last
+                            low_val = float(df['Low'][yf_code].iloc[-1]) if 'Low' in df.columns.get_level_values(0) else last
+                            vol_val = int(df['Volume'][yf_code].iloc[-1]) if 'Volume' in df.columns.get_level_values(0) else 0
+                            results.append({
+                                'code': str(orig_code),
+                                'name': str(orig_code).split('.')[0],
+                                'market': market,
+                                'date': today,
+                                'open': open_val,
+                                'high': high_val,
+                                'low': low_val,
+                                'close': float(last),
+                                'volume': vol_val,
+                            })
+                        except Exception:
+                            pass
+                else:
+                    # 单标的时返回普通 columns
+                    if len(batch_codes) == 1 and 'Close' in df.columns:
+                        close_series = df['Close'].dropna()
+                        if not close_series.empty:
+                            last = close_series.iloc[-1]
+                            results.append({
+                                'code': str(orig_codes[0]),
+                                'name': str(orig_codes[0]).split('.')[0],
+                                'market': market,
+                                'date': today,
+                                'open': float(df['Open'].iloc[-1]) if 'Open' in df.columns else last,
+                                'high': float(df['High'].iloc[-1]) if 'High' in df.columns else last,
+                                'low': float(df['Low'].iloc[-1]) if 'Low' in df.columns else last,
+                                'close': float(last),
+                                'volume': int(df['Volume'].iloc[-1]) if 'Volume' in df.columns else 0,
+                            })
+            except Exception as e:
+                logger.warning(f"批量实时采集 {market} 第{i//batch_size+1}批失败: {e}")
+            time.sleep(1)  # 每批间隔1秒，避免触发速率限制
+
+        return results
+
     def collect_all_realtime(self):
         results = []
-        
+
+        # --- A股：整体快照（O(1)查找）+ 批量事务提交 ---
         logger.info(f"开始采集A股实时行情，共 {len(self.a_stock_pool)} 只")
+        a_batch = []
         for code in self.a_stock_pool:
             data = self.collect_realtime(code, market='A')
             if data:
                 results.append(data)
-                self._save_to_database(data)
-            time.sleep(0.3)
-        
-        logger.info(f"开始采集港股实时行情，共 {len(self.hk_stock_pool)} 只")
-        for code in self.hk_stock_pool:
-            data = self.collect_realtime(code, market='H')
-            if data:
-                results.append(data)
-                self._save_to_database(data)
-            time.sleep(0.3)
-        
-        logger.info(f"开始采集美股实时行情，共 {len(self.us_stock_pool)} 只")
-        for code in self.us_stock_pool:
-            data = self.collect_realtime(code, market='US')
-            if data:
-                results.append(data)
-                self._save_to_database(data)
-            time.sleep(0.3)
-        
+                a_batch.append(data)
+        self._save_batch_to_database(a_batch)
+        logger.info(f"A股实时行情写库完成，共 {len(a_batch)} 条")
+
+        # --- 港股：批量下载，最多 MAX_REALTIME_FOREIGN_STOCKS 只 ---
+        hk_codes = self.hk_stock_pool[: self._MAX_REALTIME_FOREIGN_STOCKS]
+        logger.info(f"开始批量采集港股实时行情，共 {len(hk_codes)} 只（标的池总量 {len(self.hk_stock_pool)}）")
+        hk_data = self._collect_foreign_realtime_batch(hk_codes, market='H')
+        for data in hk_data:
+            results.append(data)
+            self._save_to_database(data)
+
+        # --- 美股：批量下载，最多 MAX_REALTIME_FOREIGN_STOCKS 只 ---
+        us_codes = self.us_stock_pool[: self._MAX_REALTIME_FOREIGN_STOCKS]
+        logger.info(f"开始批量采集美股实时行情，共 {len(us_codes)} 只（标的池总量 {len(self.us_stock_pool)}）")
+        us_data = self._collect_foreign_realtime_batch(us_codes, market='US')
+        for data in us_data:
+            results.append(data)
+            self._save_to_database(data)
+
         logger.info(f"采集完成，成功采集 {len(results)} 条数据")
         return results
     
@@ -442,6 +541,43 @@ class StockCollector:
                 return False
 
         return False
+
+    def _save_batch_to_database(self, data_list, batch_size=500):
+        """批量 upsert，每 batch_size 条提交一次，大幅减少 commit 次数"""
+        if not data_list:
+            return
+        today = datetime.now().date()
+        codes = [d['code'] for d in data_list]
+        # SQLite 变量数限制约为 999，分块预取已存在记录
+        existing_map = {}
+        chunk_size = 800
+        for c in range(0, len(codes), chunk_size):
+            chunk = codes[c: c + chunk_size]
+            try:
+                for r in self.session.query(RawStockData).filter(
+                    RawStockData.code.in_(chunk),
+                    RawStockData.date == today,
+                ).all():
+                    existing_map[r.code] = r
+            except Exception:
+                pass
+
+        for i in range(0, len(data_list), batch_size):
+            batch = data_list[i: i + batch_size]
+            try:
+                for data in batch:
+                    existing = existing_map.get(data['code'])
+                    if existing:
+                        for key, value in data.items():
+                            if hasattr(existing, key):
+                                setattr(existing, key, value)
+                    else:
+                        record = RawStockData(**data)
+                        self.session.add(record)
+                self.session.commit()
+            except Exception as e:
+                self.session.rollback()
+                logger.error(f"批量保存数据失败(batch {i//batch_size}): {e}")
 
     def _get_local_history_sources(self):
         return [
@@ -574,6 +710,23 @@ class StockCollector:
         
         df.set_index('date', inplace=True)
         return df
+
+    def get_codes_with_min_history(self, market='A', min_rows=60):
+        """按市场批量查询满足最小历史条数的股票代码。"""
+        try:
+            normalized_market = str(market or 'A').strip().upper()
+            required_rows = max(int(min_rows or 0), 1)
+            rows = (
+                self.session.query(RawStockData.code)
+                .filter(RawStockData.market == normalized_market)
+                .group_by(RawStockData.code)
+                .having(func.count(RawStockData.id) >= required_rows)
+                .all()
+            )
+            return {str(row[0]).strip().upper() for row in rows if row and row[0]}
+        except Exception as e:
+            logger.warning(f"批量查询可用历史代码失败[{market}]: {e}")
+            return set()
     
     # ==================== 全市场股票池获取 ====================
     

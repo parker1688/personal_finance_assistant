@@ -7,6 +7,7 @@ import sys
 import os
 import json
 import csv
+import time
 from functools import lru_cache
 from datetime import datetime, timedelta
 from flask import jsonify, request
@@ -26,6 +27,31 @@ logger = get_logger(__name__)
 
 # 全局推荐引擎实例
 recommender = StockRecommender()
+
+_CACHE_TTL_SECONDS = {
+    'probability_health': 300,
+    'live_stock_fallback': 120,
+}
+_PROBABILITY_HEALTH_CACHE = {}
+_LIVE_STOCK_FALLBACK_CACHE = {}
+
+
+def _cache_get(cache_dict, key, ttl_seconds):
+    entry = cache_dict.get(key)
+    if not entry:
+        return None
+    now = time.time()
+    if now - float(entry.get('ts', 0.0)) > float(ttl_seconds):
+        cache_dict.pop(key, None)
+        return None
+    return entry.get('value')
+
+
+def _cache_set(cache_dict, key, value):
+    cache_dict[key] = {
+        'ts': time.time(),
+        'value': value,
+    }
 
 # 港股/美股常用代码映射（用于名称兜底）
 _OVERSEAS_STOCK_META = {
@@ -2117,6 +2143,7 @@ def register_recommendations_routes(app):
         """获取推荐列表"""
         try:
             query_type = type_alias.get(type, type)
+            today = get_today()
             market_sentiment_value = get_market_sentiment()
             sort_by = request.args.get('sort_by', 'score')
             order = request.args.get('order', 'desc')
@@ -2130,7 +2157,15 @@ def register_recommendations_routes(app):
             query_date = _latest_recommendation_date(session, query_type)
             probability_health = {}
             try:
-                probability_health = _calc_probability_health(session, get_today(), [query_type]).get(query_type, {})
+                health_cache_key = (query_type, today.isoformat())
+                probability_health = _cache_get(
+                    _PROBABILITY_HEALTH_CACHE,
+                    health_cache_key,
+                    _CACHE_TTL_SECONDS['probability_health']
+                )
+                if probability_health is None:
+                    probability_health = _calc_probability_health(session, today, [query_type]).get(query_type, {})
+                    _cache_set(_PROBABILITY_HEALTH_CACHE, health_cache_key, probability_health)
             except Exception as e:
                 logger.warning(f"构建资产级模型状态失败[{query_type}]: {e}")
                 probability_health = {}
@@ -2180,7 +2215,15 @@ def register_recommendations_routes(app):
             recommendations = query.offset(offset).limit(limit).all()
 
             if query_type in ['a_stock', 'hk_stock', 'us_stock'] and not keyword and offset == 0 and total_count < min(limit, 5):
-                live_stock_recs = _build_live_stock_list_fallback(query_type, limit=limit, probability_health=probability_health)
+                fallback_cache_key = (query_type, limit, today.isoformat())
+                live_stock_recs = _cache_get(
+                    _LIVE_STOCK_FALLBACK_CACHE,
+                    fallback_cache_key,
+                    _CACHE_TTL_SECONDS['live_stock_fallback']
+                )
+                if live_stock_recs is None:
+                    live_stock_recs = _build_live_stock_list_fallback(query_type, limit=limit, probability_health=probability_health)
+                    _cache_set(_LIVE_STOCK_FALLBACK_CACHE, fallback_cache_key, live_stock_recs)
                 if len(live_stock_recs) > total_count:
                     portfolio_advice = recommender._build_portfolio_advice(live_stock_recs)
                     horizon_top_picks = _build_horizon_top_picks(live_stock_recs)
@@ -2198,7 +2241,7 @@ def register_recommendations_routes(app):
                             'limit': limit,
                             'offset': offset,
                             'keyword': keyword,
-                            'as_of': get_today().isoformat(),
+                            'as_of': today.isoformat(),
                             'recommendations': live_stock_recs,
                             'portfolio_advice': portfolio_advice,
                             'horizon_top_picks': horizon_top_picks,

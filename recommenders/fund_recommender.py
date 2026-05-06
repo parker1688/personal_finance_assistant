@@ -7,8 +7,13 @@ import sys
 import os
 import json
 from datetime import datetime, timedelta
-import tushare as ts
 import pandas as pd
+import numpy as np
+import pickle
+try:
+    import tushare as ts
+except ImportError:
+    ts = None
 
 from models import get_session, Holding, RawFundData
 
@@ -26,10 +31,259 @@ class FundRecommender(BaseRecommender):
 
     def __init__(self):
         super().__init__()
-        self._pro = self._init_pro()
+        self._pro = self._init_pro() if ts is not None else None
         self._nav_perf = {}   # code -> {'ret_1m': float, 'ret_3m': float}
         self._risk_metrics = {}  # code -> {'vol_90d': float, 'mdd_180d': float, 'rar_3m': float}
         self.fund_pool = self._get_fund_pool()
+        self._ml_model = None          # fund_model.pkl
+        self._ml_feature_cols = None
+        self._ml_model_loaded = False
+        self._ml_decision_threshold = 0.50
+        self._ml_calibrator = None
+        self._ml_calibration_method = 'none'
+        self._ml_gate_passed = False
+        self._fund_nav_cache = {}      # code -> sorted nav Series (for ML features)
+
+    # ──────────────────────────────────────────────────────────────────
+    # ML 模型接入 (fund_model.pkl)
+    # ──────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _apply_calibrator(method, calibrator, proba):
+        import numpy as np
+        p = np.clip(float(proba), 1e-6, 1 - 1e-6)
+        if calibrator is None or method == 'none':
+            return p
+        try:
+            if method == 'platt':
+                return float(np.clip(
+                    calibrator.predict_proba([[p]])[0][1], 1e-6, 1 - 1e-6
+                ))
+            if method == 'isotonic':
+                return float(np.clip(calibrator.predict([p])[0], 1e-6, 1 - 1e-6))
+        except Exception:
+            return p
+        return p
+
+    def _load_ml_model(self):
+        """延迟加载 fund_model.pkl，只加载一次。gate 未通过则跳过 ML。"""
+        if self._ml_model_loaded:
+            return self._ml_model is not None and self._ml_gate_passed
+        self._ml_model_loaded = True
+        try:
+            model_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'models', 'fund_model.pkl'
+            )
+            if not os.path.exists(model_path):
+                logger.warning('fund_model.pkl 不存在，ML评分将跳过')
+                return False
+            with open(model_path, 'rb') as f:
+                payload = pickle.load(f)
+            gate_passed = bool(payload.get('validation_passed', True))
+            if not gate_passed:
+                gate_name = payload.get('validation_gate', 'unknown')
+                gate_reason = payload.get('validation_reason', '')
+                logger.warning(
+                    f'fund_model.pkl 未通过 validation gate ({gate_name}): {gate_reason}，ML评分将跳过'
+                )
+                return False
+            self._ml_model = payload.get('model')
+            self._ml_feature_cols = payload.get('feature_columns', [])
+            self._ml_decision_threshold = float(payload.get('decision_threshold', 0.50))
+            self._ml_calibrator = payload.get('calibrator', None)
+            self._ml_calibration_method = payload.get('calibration_method', 'none')
+            self._ml_gate_passed = True
+            logger.info(
+                f'fund_model.pkl 已加载: {len(self._ml_feature_cols)} 特征, '
+                f'threshold={self._ml_decision_threshold:.2f}, '
+                f'cal={self._ml_calibration_method}, '
+                f'gate_passed={gate_passed}'
+            )
+            return True
+        except Exception as e:
+            logger.warning(f'fund_model.pkl 加载失败: {e}')
+            return False
+
+    def _load_fund_nav_series(self, code):
+        """从 RawFundData 读取单只基金的完整净值序列。"""
+        if code in self._fund_nav_cache:
+            return self._fund_nav_cache[code]
+        session = None
+        try:
+            raw = str(code or '').strip().upper()
+            base = raw[:-3] if raw.endswith('.OF') else raw.split('.')[0]
+            variants = [c for c in [raw, base, f'{base}.OF'] if c]
+            session = get_session()
+            rows = (
+                session.query(RawFundData)
+                .filter(RawFundData.code.in_(variants))
+                .order_by(RawFundData.date.asc())
+                .all()
+            )
+            data = []
+            for row in rows:
+                if not row.date or row.nav is None:
+                    continue
+                nav = float(row.nav or 0)
+                if nav <= 0:
+                    continue
+                data.append((pd.Timestamp(row.date), nav))
+            if not data:
+                self._fund_nav_cache[code] = None
+                return None
+            df = pd.DataFrame(data, columns=['date', 'nav']).drop_duplicates(subset=['date']).sort_values('date').reset_index(drop=True)
+            self._fund_nav_cache[code] = df
+            return df
+        except Exception as e:
+            logger.debug(f'基金历史净值读取失败 {code}: {e}')
+            self._fund_nav_cache[code] = None
+            return None
+        finally:
+            if session:
+                session.close()
+
+    def _get_macro_snapshot(self):
+        """从本地 CSV 读取最新 CPI/PMI/SHIBOR，读取失败时回退硬编码。"""
+        if hasattr(self, '_macro_snap'):
+            return self._macro_snap
+        snap = {'cpi_yoy': 1.0, 'pmi': 50.0, 'shibor_1w': 1.42, 'shibor_1m': 1.44}
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+        try:
+            cpi_path = os.path.join(data_dir, 'macro_cpi.csv')
+            if os.path.exists(cpi_path):
+                df_cpi = pd.read_csv(cpi_path)
+                df_cpi = df_cpi.dropna(subset=['nt_yoy']).sort_values('month')
+                if len(df_cpi):
+                    snap['cpi_yoy'] = float(df_cpi['nt_yoy'].iloc[-1])
+        except Exception:
+            pass
+        try:
+            pmi_path = os.path.join(data_dir, 'macro_pmi.csv')
+            if os.path.exists(pmi_path):
+                df_pmi = pd.read_csv(pmi_path)
+                df_pmi = df_pmi.dropna(subset=['manufacturing_pmi']).sort_values('month')
+                if len(df_pmi):
+                    snap['pmi'] = float(df_pmi['manufacturing_pmi'].iloc[-1])
+        except Exception:
+            pass
+        try:
+            shibor_path = os.path.join(data_dir, 'macro_shibor.csv')
+            if os.path.exists(shibor_path):
+                df_sh = pd.read_csv(shibor_path).sort_values('date')
+                if len(df_sh):
+                    snap['shibor_1w'] = float(df_sh['1w'].iloc[-1])
+                    snap['shibor_1m'] = float(df_sh['1m'].iloc[-1])
+        except Exception:
+            pass
+        self._macro_snap = snap
+        return snap
+
+    def _get_market_snapshot(self):
+        """对齐 train_fund.py 的市场情绪默认快照。"""
+        if hasattr(self, '_mkt_snap'):
+            return self._mkt_snap
+        snap = {
+            'mkt_ret_5d': 0.0,
+            'mkt_ret_20d': 0.0,
+            'mkt_vol_20d': 0.20,
+            'mkt_up_trend': 0.5,
+        }
+        try:
+            etf_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'historical_etf.csv'
+            )
+            if os.path.exists(etf_path):
+                etf = pd.read_csv(etf_path)
+                etf = etf[etf['code'] == '510300.SH'].sort_values('date')
+                if len(etf) >= 21:
+                    close = etf['close'].values.astype(float)
+                    snap['mkt_ret_5d'] = (close[-1] - close[-6]) / close[-6] if close[-6] > 0 else 0.0
+                    snap['mkt_ret_20d'] = (close[-1] - close[-21]) / close[-21] if close[-21] > 0 else 0.0
+                    rets = np.diff(close[-21:]) / (close[-21:-1] + 1e-9)
+                    snap['mkt_vol_20d'] = float(np.std(rets) * np.sqrt(252))
+                    ma20 = float(np.mean(close[-21:]))
+                    snap['mkt_up_trend'] = 1.0 if close[-1] > ma20 else 0.0
+        except Exception:
+            pass
+        self._mkt_snap = snap
+        return snap
+
+    def _build_ml_features(self, code, nav_perf, risk_metrics):
+        """按 train_fund.py extract_features 的同构逻辑构建最新一期 23 维特征。"""
+        if not self._ml_feature_cols:
+            return None
+
+        series = self._load_fund_nav_series(code)
+        if series is None or len(series) < 31:
+            return None
+
+        nav_values = series['nav'].values.astype(float)
+        i = len(nav_values) - 1
+        prev_nav = nav_values[:i]
+        returns = np.diff(prev_nav) / (prev_nav[:-1] + 1e-9)
+        feat = {}
+
+        feat['return_5d'] = (nav_values[i] - nav_values[i - 5]) / nav_values[i - 5] if nav_values[i - 5] > 0 else 0.0
+        feat['return_10d'] = (nav_values[i] - nav_values[i - 10]) / nav_values[i - 10] if nav_values[i - 10] > 0 else 0.0
+        feat['return_20d'] = (nav_values[i] - nav_values[i - 20]) / nav_values[i - 20] if nav_values[i - 20] > 0 else 0.0
+        feat['return_30d'] = (nav_values[i] - nav_values[i - 30]) / nav_values[i - 30] if nav_values[i - 30] > 0 else 0.0
+        feat['volatility_5d'] = float(np.std(returns[-5:]) * np.sqrt(252)) if len(returns) >= 5 else 0.0
+        feat['volatility_10d'] = float(np.std(returns[-10:]) * np.sqrt(252)) if len(returns) >= 10 else 0.0
+        feat['volatility_20d'] = float(np.std(returns[-20:]) * np.sqrt(252)) if len(returns) >= 20 else 0.0
+        avg_ret = float(np.mean(returns[-20:])) if len(returns) >= 20 else 0.0
+        std_ret = float(np.std(returns[-20:])) if len(returns) >= 20 else 1.0
+        feat['sharpe_ratio'] = (avg_ret - 0.00005) / (std_ret + 1e-6) if std_ret > 0 else 0.0
+        recent = returns[-30:] if len(returns) >= 30 else returns
+        cumulative = np.cumprod(1 + np.clip(recent, -0.5, 0.5))
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = (cumulative - running_max) / (running_max + 1e-9)
+        feat['max_drawdown'] = float(np.min(drawdown)) if len(drawdown) > 0 else 0.0
+        positive_cnt = int(np.sum(returns[-20:] > 0)) if len(returns) >= 20 else 0
+        feat['positive_days_ratio'] = positive_cnt / min(20, max(len(returns), 1))
+        ma10 = float(np.mean(nav_values[i - 10:i + 1])) if i >= 10 else float(nav_values[i])
+        ma20 = float(np.mean(nav_values[i - 20:i + 1])) if i >= 20 else float(nav_values[i])
+        feat['nav_ma10_ratio'] = (nav_values[i] / ma10 - 1) if ma10 > 0 else 0.0
+        feat['nav_ma20_ratio'] = (nav_values[i] / ma20 - 1) if ma20 > 0 else 0.0
+
+        macro = self._get_macro_snapshot()
+        feat['cpi_yoy'] = macro['cpi_yoy']
+        feat['pmi'] = macro['pmi']
+        feat['shibor_1w'] = macro['shibor_1w']
+        feat['shibor_1m'] = macro['shibor_1m']
+        feat.update(self._get_market_snapshot())
+
+        ref_date = pd.Timestamp(series['date'].iloc[-1])
+        month = int(ref_date.month)
+        feat['month_sin'] = float(np.sin(2 * np.pi * month / 12))
+        feat['month_cos'] = float(np.cos(2 * np.pi * month / 12))
+        feat['is_q1'] = 1.0 if month in (1, 2, 3) else 0.0
+
+        row = [feat.get(col, 0.0) for col in self._ml_feature_cols]
+        return pd.DataFrame([row], columns=self._ml_feature_cols)
+
+    def _ml_score_fund(self, code, nav_perf, risk_metrics):
+        """
+        返回 ML 模型预测的"上涨概率" [0, 1]（已校准），失败时返回 None。
+        gate 未通过则直接返回 None。
+        """
+        if not self._load_ml_model():
+            return None
+        try:
+            X = self._build_ml_features(code, nav_perf, risk_metrics)
+            if X is None:
+                return None
+            if hasattr(self._ml_model, 'predict_proba'):
+                raw_prob = float(self._ml_model.predict_proba(X)[0][1])
+            else:
+                raw_prob = float(self._ml_model.predict(X)[0])
+            prob = self._apply_calibrator(
+                self._ml_calibration_method, self._ml_calibrator, raw_prob
+            )
+            return max(0.0, min(1.0, prob))
+        except Exception as e:
+            logger.debug(f'ML评分异常 {code}: {e}')
+            return None
 
     def get_asset_type(self):
         return "active_fund"
@@ -606,6 +860,21 @@ class FundRecommender(BaseRecommender):
             logger.warning(f"计算基金评分异常: {e}")
             return 3.0
 
+    def _calculate_fund_score_with_ml(self, fund, nav_perf=None, risk_metrics=None):
+        """
+        规则评分 (70%) + ML概率评分 (30%) 融合。
+        ML 不可用时自动退化为纯规则评分。
+        """
+        rule_score = self._calculate_fund_score(fund, nav_perf, risk_metrics)
+        code = fund.get('code', '')
+        ml_prob = self._ml_score_fund(code, nav_perf or {}, risk_metrics or {})
+        if ml_prob is None:
+            return rule_score
+        # ML概率 [0,1] 映射到 [1,5] 分制
+        ml_score = 1.0 + ml_prob * 4.0
+        fused = round(0.7 * rule_score + 0.3 * ml_score, 2)
+        return max(1.0, min(5.0, fused))
+
     def get_recommendations(self, limit=20):
         """获取基金推荐 (增强版: 使用真实NAV表现驱动评分)"""
         # 重新加载基金池
@@ -643,7 +912,8 @@ class FundRecommender(BaseRecommender):
         recommendations = []
         for fund in self.fund_pool:
             try:
-                score = self._calculate_fund_score(fund, nav_perf, risk_metrics)
+                score = self._calculate_fund_score_with_ml(fund, nav_perf, risk_metrics)
+                ml_prob = self._ml_score_fund(fund.get('code', ''), nav_perf, risk_metrics)
                 perf  = nav_perf.get(fund['code'], {})
                 risk  = risk_metrics.get(fund['code'], {})
                 current_price = perf.get('nav')
@@ -657,6 +927,8 @@ class FundRecommender(BaseRecommender):
                 reasons = [f"管理费{fund['mgmt_fee']:.2f}%"]
                 if current_price is not None and nav_date:
                     reasons.append(f"NAV({nav_date})={current_price:.4f}")
+                if ml_prob is not None:
+                    reasons.append(f"ML上涨概率{ml_prob:.1%}")
                 if ret_1m is not None:
                     reasons.append(f"近1月{'↑' if ret_1m > 0 else '↓'}{abs(ret_1m):.1f}%")
                 if ret_3m is not None:
@@ -682,6 +954,7 @@ class FundRecommender(BaseRecommender):
                     'rar_3m':      rar_3m,
                     'reason':      '; '.join(reasons),
                     'data_source': 'TuShare',
+                    'ml_score':    round(ml_prob, 4) if ml_prob is not None else None,
                     'update_time': fund.get('last_update', datetime.now().isoformat()),
                 })
             except Exception as e:

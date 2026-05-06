@@ -77,6 +77,48 @@ class BacktestValidator:
 
         return 0.0
     
+    def _calc_max_drawdown(self, close_series: pd.Series) -> float:
+        """计算价格序列的最大回撤（百分比，负数表示回撤）。"""
+        if close_series is None or len(close_series) < 2:
+            return 0.0
+        prices = pd.to_numeric(close_series, errors='coerce').dropna().values
+        if len(prices) < 2:
+            return 0.0
+        peak = prices[0]
+        max_dd = 0.0
+        for p in prices[1:]:
+            if p > peak:
+                peak = p
+            dd = (p - peak) / peak * 100
+            if dd < max_dd:
+                max_dd = dd
+        return round(max_dd, 4)
+
+    def _get_benchmark_return(self, start_date, end_date, benchmark_code: str = '000300.SH') -> Optional[float]:
+        """
+        获取基准指数（默认沪深300）在 [start_date, end_date] 期间的涨跌幅。
+        优先从 DB 查询，失败时返回 None。
+        """
+        try:
+            df = self.collector.get_stock_data_from_db(benchmark_code)
+            if df is None or df.empty:
+                return None
+            hist = self._normalize_history_frame(df)
+            if hist is None or hist.empty:
+                return None
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+            window = hist[(hist['date'] >= start_ts) & (hist['date'] <= end_ts)].copy()
+            if len(window) < 2:
+                return None
+            p0 = float(window['close'].iloc[0])
+            p1 = float(window['close'].iloc[-1])
+            if p0 <= 0:
+                return None
+            return round((p1 - p0) / p0 * 100, 4)
+        except Exception:
+            return None
+
     def validate_take_profit_signals(self, holding_id: int, days: int = 30) -> Dict[str, Any]:
         """
         验证止盈建议的准确性
@@ -146,7 +188,19 @@ class BacktestValidator:
             # 计算最高价和目标达成情况
             max_price = history_after_signal['close'].max()
             max_profit_rate = (max_price - current_price) / current_price * 100 if current_price > 0 else 0
-            
+
+            # 计算最大回撤（信号日后持仓期间）
+            max_drawdown = self._calc_max_drawdown(history_after_signal['close'])
+
+            # 计算相较沪深300的超额收益
+            end_date = history_after_signal['date'].iloc[-1].date() if len(history_after_signal) > 0 else signal_date
+            benchmark_return = self._get_benchmark_return(signal_date, end_date)
+            stock_return = (history_after_signal['close'].iloc[-1] - current_price) / current_price * 100 if current_price > 0 else None
+            if benchmark_return is not None and stock_return is not None:
+                excess_return_vs_hs300 = round(stock_return - benchmark_return, 4)
+            else:
+                excess_return_vs_hs300 = None
+
             # 检查是否达到目标价
             target_hit = max_price >= target_price
             
@@ -177,6 +231,8 @@ class BacktestValidator:
                 'days_to_target': days_to_target,
                 'target_hit': target_hit,
                 'max_profit_rate': max_profit_rate,
+                'max_drawdown': max_drawdown,                    # 新增：持仓期间最大回撤%
+                'excess_return_vs_hs300': excess_return_vs_hs300,  # 新增：相较沪深300超额收益%
                 'status': status
             }
             

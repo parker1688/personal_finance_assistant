@@ -9,8 +9,11 @@ import json
 from datetime import datetime, timedelta
 from flask import jsonify, request
 import numpy as np
-import tushare as ts
-from sqlalchemy import text
+try:
+    import tushare as ts
+except ImportError:
+    ts = None
+from sqlalchemy import text, func, case
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -230,77 +233,60 @@ def register_dashboard_routes(app):
         获取仪表盘汇总数据
         GET /api/dashboard/summary
         """
+        session = None
         try:
             session = get_session()
             today = get_today()
+            today_start = datetime.now().replace(hour=0, minute=0, second=0)
             
-            # 获取今日预警数量
-            today_warnings = session.query(Warning).filter(
-                Warning.warning_time >= datetime.now().replace(hour=0, minute=0, second=0)
-            ).count()
-            
-            high_warnings = session.query(Warning).filter(
-                Warning.warning_time >= datetime.now().replace(hour=0, minute=0, second=0),
-                Warning.level == 'high'
-            ).count()
-            
-            medium_warnings = session.query(Warning).filter(
-                Warning.warning_time >= datetime.now().replace(hour=0, minute=0, second=0),
-                Warning.level == 'medium'
-            ).count()
+            # 单次聚合查询预警统计，减少多次 count 往返
+            warning_agg = session.query(
+                func.count(Warning.id),
+                func.sum(case((Warning.level == 'high', 1), else_=0)),
+                func.sum(case((Warning.level == 'medium', 1), else_=0)),
+            ).filter(
+                Warning.warning_time >= today_start
+            ).one()
+            today_warnings = int(warning_agg[0] or 0)
+            high_warnings = int(warning_agg[1] or 0)
+            medium_warnings = int(warning_agg[2] or 0)
             
             # 获取最近一批可用推荐数量（避免当天未刷新时页面空白）
             recommendation_batch_date = _get_latest_recommendation_date(session, today=today)
-            today_recommendations = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date
-            ).count() if recommendation_batch_date else 0
-            
-            # 按品类统计
-            a_stock_count = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date,
-                Recommendation.type == 'a_stock'
-            ).count() if recommendation_batch_date else 0
-            
-            hk_stock_count = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date,
-                Recommendation.type == 'hk_stock'
-            ).count() if recommendation_batch_date else 0
-            
-            us_stock_count = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date,
-                Recommendation.type == 'us_stock'
-            ).count() if recommendation_batch_date else 0
-            
-            active_fund_count = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date,
-                Recommendation.type == 'active_fund'
-            ).count() if recommendation_batch_date else 0
-            
-            etf_count = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date,
-                Recommendation.type == 'etf'
-            ).count() if recommendation_batch_date else 0
-            
-            gold_count = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date,
-                Recommendation.type == 'gold'
-            ).count() if recommendation_batch_date else 0
-            
-            silver_count = session.query(Recommendation).filter(
-                Recommendation.date == recommendation_batch_date,
-                Recommendation.type == 'silver'
-            ).count() if recommendation_batch_date else 0
+            type_counts = {}
+            if recommendation_batch_date:
+                type_rows = session.query(
+                    Recommendation.type,
+                    func.count(Recommendation.id)
+                ).filter(
+                    Recommendation.date == recommendation_batch_date
+                ).group_by(
+                    Recommendation.type
+                ).all()
+                type_counts = {str(t): int(c or 0) for t, c in type_rows}
+
+            today_recommendations = int(sum(type_counts.values()))
+            a_stock_count = int(type_counts.get('a_stock', 0))
+            hk_stock_count = int(type_counts.get('hk_stock', 0))
+            us_stock_count = int(type_counts.get('us_stock', 0))
+            active_fund_count = int(type_counts.get('active_fund', 0))
+            etf_count = int(type_counts.get('etf', 0))
+            gold_count = int(type_counts.get('gold', 0))
+            silver_count = int(type_counts.get('silver', 0))
             
             # 获取整体准确率（最近30天）
             thirty_days_ago = today - timedelta(days=30)
-            accuracy_stats = session.query(AccuracyStat).filter(
+            accuracy_totals = session.query(
+                func.sum(AccuracyStat.total_count),
+                func.sum(AccuracyStat.correct_count)
+            ).filter(
                 AccuracyStat.stat_date >= thirty_days_ago
-            ).all()
-            
-            if accuracy_stats:
-                total_predictions = sum(s.total_count for s in accuracy_stats)
-                total_correct = sum(s.correct_count for s in accuracy_stats)
-                overall_accuracy = (total_correct / total_predictions * 100) if total_predictions > 0 else 0
+            ).one()
+
+            total_predictions = int(accuracy_totals[0] or 0)
+            total_correct = int(accuracy_totals[1] or 0)
+            if total_predictions > 0:
+                overall_accuracy = (total_correct / total_predictions * 100)
             else:
                 overall_accuracy = None
 
@@ -314,25 +300,34 @@ def register_dashboard_routes(app):
             
             # 获取准确率趋势（最近7天）
             accuracy_trend = []
+            trend_start = today - timedelta(days=6)
+            trend_rows = session.query(
+                AccuracyStat.stat_date,
+                func.sum(AccuracyStat.total_count),
+                func.sum(AccuracyStat.correct_count)
+            ).filter(
+                AccuracyStat.stat_date >= trend_start,
+                AccuracyStat.stat_date <= today
+            ).group_by(
+                AccuracyStat.stat_date
+            ).all()
+            trend_map = {
+                day: {
+                    'total': int(total or 0),
+                    'correct': int(correct or 0)
+                }
+                for day, total, correct in trend_rows
+            }
             for i in range(7):
-                date = today - timedelta(days=i)
-                day_stats = session.query(AccuracyStat).filter(
-                    AccuracyStat.stat_date == date
-                ).all()
-                
-                if day_stats:
-                    day_total = sum(s.total_count for s in day_stats)
-                    day_correct = sum(s.correct_count for s in day_stats)
-                    day_accuracy = (day_correct / day_total * 100) if day_total > 0 else 0
-                else:
-                    day_accuracy = 0
-                
+                date = trend_start + timedelta(days=i)
+                bucket = trend_map.get(date, {'total': 0, 'correct': 0})
+                day_total = int(bucket['total'])
+                day_correct = int(bucket['correct'])
+                day_accuracy = (day_correct / day_total * 100) if day_total > 0 else 0
                 accuracy_trend.append({
                     'date': date.isoformat(),
                     'accuracy': round(day_accuracy, 1)
                 })
-            
-            accuracy_trend.reverse()
             
             # 获取最近预警
             recent_warnings = session.query(Warning).order_by(
@@ -484,8 +479,6 @@ def register_dashboard_routes(app):
                 action_backtest,
             )
             
-            session.close()
-            
             return jsonify({
                 'code': 200,
                 'status': 'success',
@@ -531,14 +524,17 @@ def register_dashboard_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session:
+                session.close()
     
     @app.route('/api/market/temperature', methods=['GET'])
     def get_market_temperature():
         """获取市场温度"""
+        session = None
         try:
             session = get_session()
             temperature = _get_cached_market_temperature(session)
-            session.close()
             
             return jsonify({
                 'code': 200,
@@ -554,6 +550,9 @@ def register_dashboard_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+        finally:
+            if session:
+                session.close()
     
     @app.route('/api/health', methods=['GET'])
     def dashboard_health_check():

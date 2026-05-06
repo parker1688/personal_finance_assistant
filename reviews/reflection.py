@@ -15,6 +15,19 @@ from utils import get_logger
 
 logger = get_logger(__name__)
 
+# 各资产波动率阈值：(high_volatility_threshold, trend_reversal_threshold)
+# 不同资产的正常波动范围差异巨大，不能用同一把尺子衡量
+_ASSET_VOLATILITY_THRESHOLDS = {
+    'a_stock':  (8.0, 3.0),   # A股涨跌停板10%，>8%属极端波动
+    'hk_stock': (6.0, 2.5),   # 港股无涨跌停，日均波幅略低于A股
+    'us_stock': (5.0, 2.0),   # 美股大盘日均波幅较小
+    'fund':     (4.0, 1.5),   # 基金净值变化更平滑
+    'etf':      (5.0, 2.0),   # ETF介于股票和基金之间
+    'gold':     (2.5, 1.0),   # 黄金日波动通常<1%，>2.5%已属异常
+    'silver':   (3.5, 1.5),   # 白银波动比黄金略大
+}
+_DEFAULT_VOLATILITY_THRESHOLDS = (8.0, 3.0)  # 未知资产降级使用A股标准
+
 # 错误模式 → 改进建议
 _PATTERN_SUGGESTIONS = {
     'overconfident':  '高置信度信号中仍有大量错误，建议增加交叉验证过滤机制，或提高输出阈值至80%以上',
@@ -127,16 +140,20 @@ class ReflectionLearner:
     # ──────────────────────────────────────────────────────────────────
     def _identify_error_pattern(self, prediction):
         """
-        将单条错误预测归类为以下模式之一：
+        将单条错误预测归类为以下模式之一（阈值按资产类型区分）：
           overconfident  | 置信度≥75 却预测错误
           low_confidence | 置信度<55
           news_impact    | 复盘记录含新闻/事件关键词
-          high_volatility| |实际涨跌幅| > 8%
-          trend_reversal | 3% < |实际涨跌幅| ≤ 8%
-          small_error    | |实际涨跌幅| ≤ 3%（接近无方向震荡）
+          high_volatility| |实际涨跌幅| > 资产高波动阈值
+          trend_reversal | 资产趋势反转阈值 < |实际涨跌幅| ≤ 高波动阈值
+          small_error    | |实际涨跌幅| ≤ 趋势反转阈值（接近无方向震荡）
           other          | 其他
         """
         conf = prediction.confidence or 0
+        asset_type = str(getattr(prediction, 'asset_type', '') or '').lower()
+        high_vol_threshold, reversal_threshold = _ASSET_VOLATILITY_THRESHOLDS.get(
+            asset_type, _DEFAULT_VOLATILITY_THRESHOLDS
+        )
 
         # 过度自信
         if conf >= 75:
@@ -166,9 +183,9 @@ class ReflectionLearner:
 
         if actual_ret is not None:
             abs_ret = abs(actual_ret)
-            if abs_ret > 8:
+            if abs_ret > high_vol_threshold:
                 return 'high_volatility'
-            if abs_ret > 3:
+            if abs_ret > reversal_threshold:
                 return 'trend_reversal'
             return 'small_error'
 

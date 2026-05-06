@@ -10,6 +10,9 @@
             <span><i class="fas fa-database"></i> 自动补采任务</span>
             <div class="d-flex gap-2 align-items-center">
                 <span class="badge bg-secondary" id="backfillStatusBadge">未运行</span>
+                <button class="btn btn-sm btn-outline-danger" id="forceFinishBackfillBtn" disabled>
+                    <i class="fas fa-stop"></i> 强制结束
+                </button>
                 <button class="btn btn-sm btn-primary" id="startBackfillBtn">
                     <i class="fas fa-play"></i> 启动补缺补采
                 </button>
@@ -450,16 +453,20 @@ function loadBackfillProgress() {
                 .attr('aria-valuenow', percent);
 
             const statusBadge = $('#backfillStatusBadge');
+            const forceFinishBtn = $('#forceFinishBackfillBtn');
             statusBadge.removeClass('bg-secondary bg-primary bg-success bg-warning');
             if (p.running) {
                 statusBadge.addClass('bg-primary').text('运行中');
                 $('#backfillProgressBar').removeClass('bg-success bg-warning').addClass('bg-primary');
+                forceFinishBtn.prop('disabled', false);
             } else if ((p.failed_steps || 0) > 0) {
                 statusBadge.addClass('bg-warning').text('已结束(部分失败)');
                 $('#backfillProgressBar').removeClass('bg-primary bg-success').addClass('bg-warning');
+                forceFinishBtn.prop('disabled', true);
             } else {
                 statusBadge.addClass('bg-success').text('已结束');
                 $('#backfillProgressBar').removeClass('bg-primary bg-warning').addClass('bg-success');
+                forceFinishBtn.prop('disabled', true);
             }
 
             const steps = Array.isArray(p.steps) ? p.steps : [];
@@ -501,6 +508,28 @@ $('#startBackfillBtn').on('click', function() {
         },
         error: function(xhr) {
             const msg = (xhr.responseJSON && xhr.responseJSON.message) || '启动失败';
+            showToast(msg, 'error');
+        }
+    });
+});
+
+$('#forceFinishBackfillBtn').on('click', function() {
+    $.ajax({
+        url: '/api/backfill/force-finish',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({}),
+        success: function(r) {
+            if (r.code === 200) {
+                showToast(r.message || '已强制结束补采任务', 'success');
+                loadBackfillProgress();
+                loadDatasetInventory();
+            } else {
+                showToast(r.message || '强制结束失败', 'error');
+            }
+        },
+        error: function(xhr) {
+            const msg = (xhr.responseJSON && xhr.responseJSON.message) || '强制结束失败';
             showToast(msg, 'error');
         }
     });

@@ -739,6 +739,37 @@ def build_future_signals_data(session=None):
 
         holding_codes = {h.code for h in holdings}
 
+        recommendation_rows = (
+            session.query(Recommendation)
+            .filter(Recommendation.code.in_(holding_codes) if holding_codes else False)
+            .order_by(Recommendation.date.desc(), Recommendation.id.desc())
+            .all()
+        )
+        latest_recommendation_by_key = {}
+        for rec in recommendation_rows:
+            key = (rec.code, rec.type)
+            if key not in latest_recommendation_by_key:
+                latest_recommendation_by_key[key] = rec
+
+        prediction_rows = (
+            session.query(Prediction)
+            .filter(Prediction.code.in_(holding_codes) if holding_codes else False)
+            .filter(Prediction.period_days.in_(horizons))
+            .order_by(Prediction.date.desc(), Prediction.created_at.desc())
+            .all()
+        )
+        latest_prediction_by_key = {}
+        for pred in prediction_rows:
+            try:
+                period_days = int(pred.period_days or 0)
+            except Exception:
+                continue
+            if period_days not in horizons:
+                continue
+            key = (pred.code, period_days)
+            if key not in latest_prediction_by_key:
+                latest_prediction_by_key[key] = pred
+
         holding_signals = []
         risk_alerts = []
         action_suggestions = []
@@ -748,29 +779,16 @@ def build_future_signals_data(session=None):
             rec_type = _infer_rec_type(asset_type, h.code)
             current_price = get_current_price(h.code, asset_type) or float(h.cost_price)
 
-            rec = (
-                session.query(Recommendation)
-                .filter(Recommendation.code == h.code)
-                .filter(Recommendation.type == rec_type)
-                .order_by(Recommendation.date.desc())
-                .first()
-            )
+            rec = latest_recommendation_by_key.get((h.code, rec_type))
 
             probs = {5: 50.0, 20: 50.0, 60: 50.0}
             if rec:
                 probs = _extract_probabilities(rec)
             else:
-                preds = (
-                    session.query(Prediction)
-                    .filter(Prediction.code == h.code)
-                    .filter(Prediction.period_days.in_(horizons))
-                    .order_by(Prediction.date.desc())
-                    .all()
-                )
-                pred_map = {p.period_days: p for p in preds}
                 for hd in horizons:
-                    if hd in pred_map and pred_map[hd].up_probability is not None:
-                        probs[hd] = max(5.0, min(95.0, float(pred_map[hd].up_probability)))
+                    pred = latest_prediction_by_key.get((h.code, hd))
+                    if pred and pred.up_probability is not None:
+                        probs[hd] = max(5.0, min(95.0, float(pred.up_probability)))
 
             horizon_view = {}
             for hd in horizons:

@@ -6,6 +6,7 @@ Flask主入口 - app.py
 import os
 import sys
 import logging
+import warnings
 from contextlib import contextmanager
 from datetime import datetime
 from flask import Flask, render_template, send_from_directory, jsonify, request
@@ -21,6 +22,10 @@ from utils import get_logger, ensure_dir
 # 初始化日志
 logger = get_logger(__name__)
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+# 定向抑制第三方数值库在空样本统计时的已知运行时告警，避免污染业务日志。
+warnings.filterwarnings('ignore', message='Mean of empty slice', category=RuntimeWarning)
+warnings.filterwarnings('ignore', message='invalid value encountered in scalar divide', category=RuntimeWarning)
 
 # CORS配置 - 从环境变量读取允许的源
 ALLOWED_ORIGINS = os.environ.get('ALLOWED_ORIGINS', 'http://localhost:5000,http://localhost:3000').split(',')
