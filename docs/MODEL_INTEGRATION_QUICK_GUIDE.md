@@ -3,23 +3,23 @@
 ## 📌 核心路径映射
 
 ```
-训练脚本              →  生成的模型文件                 →  加载方式
+训练入口              →  生成的模型文件                 →  加载方式
 ─────────────────────────────────────────────────────────────────
-train_a_stock.py  →  short_term_model.pkl          → scheduler
+train_asset_suite.py --only a_stock  →  short_term_model.pkl          → scheduler
                  →  medium_term_model.pkl          → scheduler
                  →  long_term_model.pkl            → scheduler
 
-train_hk_stock.py →  hk_stock_short_term_model.pkl  → scheduler
+train_asset_suite.py --only hk_stock →  hk_stock_short_term_model.pkl  → scheduler
                  →  hk_stock_medium_term_model.pkl  → scheduler
                  →  hk_stock_long_term_model.pkl    → scheduler
 
-train_us_stock.py →  us_stock_short_term_model.pkl  → scheduler
+train_asset_suite.py --only us_stock →  us_stock_short_term_model.pkl  → scheduler
                  →  us_stock_medium_term_model.pkl  → scheduler
                  →  us_stock_long_term_model.pkl    → scheduler
 
-train_fund.py     →  fund_model.pkl                → scheduler
+train_asset_suite.py --only fund     →  fund_model.pkl                → scheduler
 
-train_gold.py     →  gold_model.pkl                → scheduler
+train_asset_suite.py --only gold,silver     →  gold_model.pkl                → scheduler
                  →  silver_model.pkl              → scheduler
 ```
 
@@ -27,20 +27,15 @@ train_gold.py     →  gold_model.pkl                → scheduler
 
 ### 第一步：训练所有模型
 ```bash
-# A股 (3个模型: 5日、20日、60日)
-python3 scripts/train_a_stock.py
+# 一键训练全部资产（推荐）
+python3 scripts/train_asset_suite.py
 
-# 港股 (3个模型)
-python3 scripts/train_hk_stock.py
-
-# 美股 (3个模型)
-python3 scripts/train_us_stock.py
-
-# 基金 (1个模型)
-python3 scripts/train_fund.py
-
-# 贵金属 (2个模型: 黄金、白银)
-python3 scripts/train_gold.py
+# 或按资产单独训练
+python3 scripts/train_asset_suite.py --only a_stock
+python3 scripts/train_asset_suite.py --only hk_stock
+python3 scripts/train_asset_suite.py --only us_stock
+python3 scripts/train_asset_suite.py --only fund
+python3 scripts/train_asset_suite.py --only gold,silver
 ```
 
 ### 第二步：验证模型文件
@@ -219,7 +214,7 @@ for pred in predictions[:5]:
 ### Q: 模型文件显示 "对象过时"
 **A:** pickle格式跨版本兼容性问题。重新训练模型：
 ```bash
-python3 scripts/train_a_stock.py
+python3 scripts/train_asset_suite.py --only a_stock
 ```
 
 ### Q: scheduler显示 "模型不存在"
@@ -236,14 +231,14 @@ ls -la data/models/
 python3 -c "import pickle; d=pickle.load(open('data/models/short_term_model.pkl','rb')); print(len(d['feature_columns']))"
 
 # 重新训练
-python3 scripts/train_a_stock.py --retrain
+python3 scripts/train_asset_suite.py --only a_stock --periods 5,20,60
 ```
 
 ### Q: 港股/美股模型加载失败
 **A:** 这些是新增的，首次运行必须先训练：
 ```bash
-python3 scripts/train_hk_stock.py
-python3 scripts/train_us_stock.py
+python3 scripts/train_asset_suite.py --only hk_stock
+python3 scripts/train_asset_suite.py --only us_stock
 ```
 
 ## 📈 性能指标
@@ -261,4 +256,4 @@ python3 scripts/train_us_stock.py
 
 ---
 
-**下一步**: 运行 `python3 scripts/train_a_stock.py` 测试完整流程 ✨
+**下一步**: 运行 `python3 scripts/train_asset_suite.py --only a_stock` 测试完整流程 ✨

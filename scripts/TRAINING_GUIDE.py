@@ -13,17 +13,17 @@ print("""
 ╚════════════════════════════════════════════════════════════════════════════╝
 
 
-📊 现有的训练脚本清单
+📊 现有的训练入口清单
 ─────────────────────────────────────────────────────────────────────────────
 
-| # | 脚本文件 | 资产类型 | 功能 | 输出模型 |
+| # | 入口文件 | 资产类型 | 功能 | 输出模型 |
 |---|---------|---------|------|---------|
-| 1 | train_a_stock.py | A股 | 三周期预测(5/20/60日) | short/medium/long_term_model.pkl |
-| 2 | train_fund.py | 基金 | 基金选择评分 | fund_model.pkl |
-| 3 | train_gold.py | 黄金/白银 | 贵金属预测 | gold_model.pkl / silver_model.pkl |
-| 4 | train_etf.py | ETF | ETF择时/强弱预测 | etf_model.pkl |
-| 5 | train_hk_stock.py | 港股 | 三周期预测(5/20/60日) | hk_stock_*.pkl |
-| 6 | train_us_stock.py | 美股 | 三周期预测(5/20/60日) | us_stock_*.pkl |
+| 1 | train_asset_suite.py --only a_stock | A股 | 三周期预测(5/20/60日) | short/medium/long_term_model.pkl |
+| 2 | train_asset_suite.py --only fund | 基金 | 基金选择评分 | fund_model.pkl |
+| 3 | train_asset_suite.py --only gold,silver | 黄金/白银 | 贵金属预测 | gold_model.pkl / silver_model.pkl |
+| 4 | train_asset_suite.py --only etf | ETF | ETF择时/强弱预测 | etf_model.pkl |
+| 5 | train_asset_suite.py --only hk_stock | 港股 | 三周期预测(5/20/60日) | hk_stock_*.pkl |
+| 6 | train_asset_suite.py --only us_stock | 美股 | 三周期预测(5/20/60日) | us_stock_*.pkl |
 | 7 | train_asset_suite.py | 统一编排 | 按资产顺序训练 | 全部模型 |
 
 
@@ -32,22 +32,22 @@ print("""
 
 # 1. 训练A股模型
 cd /Users/parker/personal_finance_assistant
-python3 scripts/train_a_stock.py
+python3 scripts/train_asset_suite.py --only a_stock
 
 # 2. 训练基金模型
-python3 scripts/train_fund.py
+python3 scripts/train_asset_suite.py --only fund
 
 # 3. 训练黄金/白银模型
-python3 scripts/train_gold.py
+python3 scripts/train_asset_suite.py --only gold,silver
 
 # 4. 训练ETF模型
-python3 scripts/train_etf.py
+python3 scripts/train_asset_suite.py --only etf
 
 # 5. 训练港股模型
-python3 scripts/train_hk_stock.py
+python3 scripts/train_asset_suite.py --only hk_stock
 
 # 6. 训练美股模型
-python3 scripts/train_us_stock.py
+python3 scripts/train_asset_suite.py --only us_stock
 
 # 一键按顺序训练所有资产模型（港股/美股最后）
 python3 scripts/train_asset_suite.py
@@ -56,7 +56,7 @@ python3 scripts/train_asset_suite.py
 📋 每个脚本的特点
 ─────────────────────────────────────────────────────────────────────────────
 
-🟢 train_a_stock.py (A股)
+🟢 A股训练模块 (predictors/a_stock_trainer.py)
    • 数据源: data/historical_a_stock.csv
    • 辅助数据: 资金流向、融资融券、北向资金、估值等
    • 训练模型: 短期(5日)、中期(20日)、长期(60日)
@@ -65,7 +65,7 @@ python3 scripts/train_asset_suite.py
    • 预测阈值: 2% (大于2%视为上涨)
 
 
-🟠 train_fund.py (基金)
+🟠 基金训练模块 (predictors/fund_trainer.py)
    • 数据源: data/fund_nav.csv (基金净值)
    • 功能性价: 评分模型，不是分类/预测
    • 输出: data/models/fund_model.pkl
@@ -73,7 +73,7 @@ python3 scripts/train_asset_suite.py
    • 评分指标: 夏普比率、最大回撤、波动率等
 
 
-🟡 train_gold.py (贵金属)
+🟡 贵金属训练模块 (predictors/precious_metal_trainer.py)
    • 数据源: data/gold_prices.csv 或 data/precious_metals.csv
    • 训练模型: 黄金5日预测 + 白银5日预测
    • 输出: data/models/gold_model.pkl, data/models/silver_model.pkl
@@ -81,7 +81,7 @@ python3 scripts/train_asset_suite.py
    • 预测阈值: 1% (比股票低，因为波动率低)
 
 
-🔵 train_hk_stock.py (港股)
+🔵 港股训练模块 (predictors/hk_stock_trainer.py)
    • 数据源: data/historical_hk_stock.csv
    • 训练模型: 短期(5日)、中期(20日)、长期(60日)
    • 输出: data/models/hk_stock_short_term_model.pkl 等
@@ -89,7 +89,7 @@ python3 scripts/train_asset_suite.py
    • 预测阈值: 2% (同A股)
 
 
-🟣 train_us_stock.py (美股)
+🟣 美股训练模块 (predictors/us_stock_trainer.py)
    • 数据源: data/historical_us_stock.csv
    • 训练模型: 短期(5日)、中期(20日)、长期(60日)
    • 输出: data/models/us_stock_short_term_model.pkl 等
@@ -149,16 +149,14 @@ val_accuracy = model_data['val_accuracy']
 
 周一: 数据更新 & 全量训练
   python3 scripts/collect_historical_data.py  # 采集最新数据
-  python3 scripts/train_a_stock.py
-  python3 scripts/train_hk_stock.py
-  python3 scripts/train_us_stock.py
+   python3 scripts/train_asset_suite.py --only a_stock,hk_stock,us_stock
 
 周中: 特定资产训练 (如需要)
   # 黄金表现异常? 重新训练黄金模型
-  python3 scripts/train_gold.py
+   python3 scripts/train_asset_suite.py --only gold,silver
   
   # 基金大幅调整? 重新评分
-  python3 scripts/train_fund.py
+   python3 scripts/train_asset_suite.py --only fund
 
 周末: 模型评估
   # 查看 data/models/ 目录中各模型的 val_accuracy
