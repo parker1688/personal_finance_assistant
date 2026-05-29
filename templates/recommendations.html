@@ -283,6 +283,19 @@ function getReliabilityText(label) {
     return textMap[label] || label || '稳定';
 }
 
+function getAssetTypeText(type) {
+    const textMap = {
+        a_stock: 'A股',
+        hk_stock: '港股',
+        us_stock: '美股',
+        etf: 'ETF',
+        active_fund: '主动基金',
+        gold: '黄金',
+        silver: '白银'
+    };
+    return textMap[type] || '当前市场';
+}
+
 function getReasonTagText(tag) {
     if (!tag) return '';
     const [key, value] = String(tag).split('=');
@@ -418,44 +431,46 @@ function renderPortfolioAdvice(advice) {
     `;
 }
 
-function loadSystemQualityAlert() {
-    $.ajax({
-        url: '/api/dashboard/summary',
-        method: 'GET',
-        success: function(response) {
-            if (!(response.code === 200 && response.data)) return;
-            const model = response.data.model_health || {};
-            const backtest = response.data.action_backtest || {};
-            const grade = backtest.overall_grade || 'N/A';
-            const status = model.overall_status || 'warning';
-            const hasBacktestSamples = !!backtest.has_action_samples;
+function renderSystemQualityAlert(modelStatus, queryType) {
+    const alertBox = $('#systemQualityAlert');
+    const status = modelStatus || {};
+    const primary = status.market_model_reliability || {};
+    const validatedCount = [
+        Boolean(status.short_term_validated),
+        Boolean(status.medium_term_validated),
+        Boolean(status.long_term_validated)
+    ].filter(Boolean).length;
 
-            if (!hasBacktestSamples) {
-                $('#systemQualityAlert').html(`
-                    <div class="alert alert-info py-2">
-                        <strong>系统提示：</strong>动作回测样本仍在积累中，当前待验证 ${response.data.pending_validation_count || 0} 条，请优先结合止损线和仓位控制使用建议。
-                        <div class="small mt-1 text-muted">动作回测评级 N/A · ${escapeHtml(backtest.recommendation || '系统正在积累验证样本')}</div>
-                    </div>
-                `).show();
-                return;
-            }
+    if (!primary.label && !primary.level) {
+        alertBox.hide().empty();
+        return;
+    }
 
-            if (grade === 'A' || grade === 'B') {
-                $('#systemQualityAlert').hide().empty();
-                return;
-            }
+    const assetText = getAssetTypeText(queryType);
+    const reliabilityText = getReliabilityText(primary.label || primary.level || 'stable');
+    const gradeText = primary.grade ? ` · 5日评级 ${escapeHtml(String(primary.grade))}` : '';
+    const sampleText = Number(primary.samples || 0) > 0 ? ` · 样本 ${escapeHtml(String(primary.samples))} 条` : '';
 
-            const alertClass = grade === 'D' || status === 'risk' ? 'alert-warning' : 'alert-info';
-            const modelText = status === 'healthy' ? '模型状态健康' : (status === 'warning' ? '模型仍需观察' : '模型需继续优化');
-            const text = backtest.recommendation || '当前建议系统仍需继续优化，建议以轻仓和观察为主。';
-            $('#systemQualityAlert').html(`
-                <div class="alert ${alertClass} py-2">
-                    <strong>系统提示：</strong>${escapeHtml(text)}
-                    <div class="small mt-1 text-muted">动作回测评级 ${grade} · ${escapeHtml(modelText)}</div>
-                </div>
-            `).show();
-        }
-    });
+    let alertClass = 'alert-info';
+    let title = '模型提示';
+    let message = `${assetText}推荐当前模型可靠性为${reliabilityText}，3 个周期中已有 ${validatedCount} 个通过验证。`;
+
+    if (!primary.passed || (primary.label || primary.level) === 'guarded') {
+        alertClass = 'alert-warning';
+        title = '可信度提示';
+        message = `${assetText}推荐当前主要依赖规则辅助或弱验证信号，列表中的动作和概率应以下调预期、观察确认优先。`;
+    }
+
+    if (primary.reason) {
+        message += ` ${primary.reason}`;
+    }
+
+    alertBox.html(`
+        <div class="alert ${alertClass} py-2">
+            <strong>${title}：</strong>${escapeHtml(message)}
+            <div class="small mt-1 text-muted">${escapeHtml(assetText)} · 可靠性 ${escapeHtml(reliabilityText)}${gradeText}${sampleText}</div>
+        </div>
+    `).show();
 }
 
 function loadRecommendations() {
@@ -475,6 +490,7 @@ function loadRecommendations() {
         success: function(response) {
             $('#loading').hide();
             if (response.code === 200 && response.data && response.data.recommendations) {
+                renderSystemQualityAlert(response.data.market_model_status, response.data.type || currentType);
                 const recs = response.data.recommendations;
                 const batchNote = response.data.as_of ? `<div class="small text-muted mb-2">推荐数据日期：${escapeHtml(response.data.as_of)}</div>` : '';
                 const frameworkSummary = renderStrategyFramework(response.data.strategy_framework || {});
@@ -551,6 +567,7 @@ function loadRecommendations() {
             $('#loading').hide();
             $('#recommendationTable').show();
             $('#recommendationCards').show();
+            $('#systemQualityAlert').hide().empty();
             $('#advisorSummary').hide().empty();
             $('#recommendationList').html('<tr><td colspan="10" class="text-center text-danger py-4">加载失败，请重试</td></tr>');
             $('#recommendationCards').html('<div class="text-center text-danger py-4">加载失败，请重试</div>');
@@ -725,7 +742,6 @@ $(document).ready(function() {
         $('#searchKeyword').val(initialKeyword);
     }
 
-    loadSystemQualityAlert();
     syncPageStateToUrl();
     loadRecommendations();
     $('#recommendationTabs button').on('click', function() {

@@ -667,6 +667,7 @@ def _build_recommendation_advisor_payload(item):
     total_score = float(item.get('total_score', 0.0) or 0.0)
     up_prob_5d = float(item.get('up_probability_5d', 50.0) or 50.0)
     volatility_level = item.get('volatility_level', 'medium')
+    trend_text = trend_text_map.get(trend_direction, '震荡整理')
 
     if trend_direction == 'bullish':
         rsi = 56 if total_score >= 4 else 60
@@ -695,6 +696,25 @@ def _build_recommendation_advisor_payload(item):
         risks=[],
         model_reliability=model_reliability,
     )
+
+    # 推荐列表优先服从资产级模型可靠性门控，避免把规则回退结果包装成高置信建议。
+    advisor['model_reliability'] = model_reliability
+    reliability_score = float(model_reliability.get('score', 55.0) or 55.0)
+    reliability_passed = bool(model_reliability.get('passed', reliability_score >= 55.0))
+    reliability_label = str(model_reliability.get('label') or model_reliability.get('level') or 'stable')
+
+    if (not reliability_passed) or reliability_label == 'guarded' or reliability_score < 45:
+        advisor['confidence'] = 'low'
+        advisor['position_size_pct'] = 0
+        advisor['review_in_days'] = max(int(advisor.get('review_in_days', 5) or 5), 5)
+        advisor['review_focus'] = ['signal_refresh', 'wait_for_breakout']
+        if not item.get('is_holding'):
+            advisor['action'] = 'watch'
+        elif advisor.get('action') in ('buy', 'add'):
+            advisor['action'] = 'hold'
+        if advisor.get('risk_level') == 'low':
+            advisor['risk_level'] = 'medium'
+        advisor['summary'] = f"模型可靠性仍偏弱，当前建议仅作辅助参考，以观察和等待确认信号为主。 当前趋势为{trend_text}。"
 
     if not item.get('is_holding') and advisor.get('action') in ('sell', 'reduce'):
         advisor['action'] = 'watch'
@@ -898,6 +918,78 @@ def _build_strength_spotlight(recommendations_list):
             'total_score': round(float(item.get('total_score', 0.0) or 0.0), 2),
         })
     return result
+
+def _apply_trust_aware_sort(recommendations_list, sort_by='score', order='desc', market_model_status=None):
+    """在原有排序基础上叠加可信度门控，弱验证场景下自动后置激进信号。"""
+    items = list(recommendations_list or [])
+    if not items:
+        return items
+
+    status = market_model_status or {}
+    reliability = status.get('market_model_reliability') or {}
+    reliability_label = str(reliability.get('label') or reliability.get('level') or 'stable')
+    reliability_score = float(reliability.get('score', 55.0) or 55.0)
+    reliability_passed = bool(reliability.get('passed', reliability_score >= 55.0))
+    weak_market = (not reliability_passed) or reliability_label in ('guarded', 'low') or reliability_score < 45.0
+
+    def _base_value(item):
+        if sort_by == 'score':
+            return float(item.get('total_score', 0.0) or 0.0)
+        if sort_by in ('probability', 'probability_5d'):
+            return float(item.get('up_probability_5d', 50.0) or 50.0)
+        if sort_by == 'probability_20d':
+            return float(item.get('up_probability_20d', 50.0) or 50.0)
+        if sort_by == 'probability_60d':
+            return float(item.get('up_probability_60d', 50.0) or 50.0)
+        if sort_by == 'volatility':
+            return {
+                'low': 1.0,
+                'medium': 2.0,
+                'high': 3.0,
+            }.get(str(item.get('volatility_level') or 'medium'), 2.0)
+        return float(item.get('rank', 0) or 0)
+
+    def _trust_adjustment(item):
+        advisor_view = item.get('advisor_view') if isinstance(item.get('advisor_view'), dict) else {}
+        action = str(item.get('advisor_action') or advisor_view.get('action') or 'watch')
+        confidence = str(item.get('advisor_confidence') or advisor_view.get('confidence') or 'low')
+        risk_level = str(item.get('risk_level') or advisor_view.get('risk_level') or 'medium')
+        strength_level = str((item.get('strength') or {}).get('level') or 'neutral_watch')
+        position_pct = float(item.get('position_size_pct', advisor_view.get('position_size_pct', 0)) or 0)
+
+        adjustment = 0.0
+        adjustment += {'low': 2.0, 'medium': 0.0, 'high': -3.0}.get(risk_level, 0.0)
+        adjustment += {'low': 0.0, 'medium': 1.5, 'high': 3.0}.get(confidence, 0.0)
+        adjustment += {'strong_bullish': 2.0, 'bullish_hold': 1.0, 'bullish_watch': 0.5}.get(strength_level, 0.0)
+
+        if weak_market:
+            if action in ('buy', 'add'):
+                adjustment -= 8.0
+            elif action == 'hold':
+                adjustment -= 2.0
+            if confidence == 'high':
+                adjustment -= 6.0
+            elif confidence == 'medium':
+                adjustment -= 3.0
+            if position_pct > 0:
+                adjustment -= 8.0
+            if risk_level == 'high':
+                adjustment -= 4.0
+            if strength_level in ('strong_bullish', 'bullish_hold'):
+                adjustment -= 4.0
+
+        return adjustment
+
+    reverse = str(order or 'desc').lower() != 'asc'
+    ranked = sorted(
+        items,
+        key=lambda item: (_base_value(item) * 10.0) + _trust_adjustment(item),
+        reverse=reverse,
+    )
+
+    for idx, item in enumerate(ranked, start=1):
+        item['rank'] = idx
+    return ranked
 
 
 def _apply_holding_recommendation(item, asset_type=None):
@@ -1631,6 +1723,12 @@ def _classify_recommendation_strength(item):
     score = float(item.get('total_score', 0.0) or 0.0)
     position_pct = int(item.get('position_size_pct', advisor.get('position_size_pct', advisor_view.get('position_size_pct', 0))) or 0)
     evidence_score = float(item.get('evidence_score', advisor.get('evidence_score', advisor_view.get('evidence_score', 50.0))) or 50.0)
+    model_reliability = item.get('market_model_reliability') or advisor.get('model_reliability') or advisor_view.get('model_reliability') or {}
+    reliability_passed = bool(model_reliability.get('passed', True))
+    reliability_level = str(model_reliability.get('level') or model_reliability.get('label') or 'medium')
+
+    if (not reliability_passed) or reliability_level in ('low', 'guarded'):
+        return {'label': '中性观察', 'level': 'neutral_watch', 'class_name': 'advisor-watch'}
 
     if action in ('sell', 'reduce') or risk_level == 'high' or (p20 < 42 and p60 < 45):
         return {'label': '防守回避', 'level': 'defensive', 'class_name': 'advisor-sell'}
@@ -2169,6 +2267,7 @@ def register_recommendations_routes(app):
             except Exception as e:
                 logger.warning(f"构建资产级模型状态失败[{query_type}]: {e}")
                 probability_health = {}
+            market_model_status = _build_asset_model_status(query_type, probability_health)
 
             query = session.query(Recommendation).filter(
                 Recommendation.type == query_type
@@ -2225,6 +2324,12 @@ def register_recommendations_routes(app):
                     live_stock_recs = _build_live_stock_list_fallback(query_type, limit=limit, probability_health=probability_health)
                     _cache_set(_LIVE_STOCK_FALLBACK_CACHE, fallback_cache_key, live_stock_recs)
                 if len(live_stock_recs) > total_count:
+                    live_stock_recs = _apply_trust_aware_sort(
+                        live_stock_recs,
+                        sort_by=sort_by,
+                        order=order,
+                        market_model_status=market_model_status,
+                    )
                     portfolio_advice = recommender._build_portfolio_advice(live_stock_recs)
                     horizon_top_picks = _build_horizon_top_picks(live_stock_recs)
                     strength_spotlight = _build_strength_spotlight(live_stock_recs)
@@ -2247,6 +2352,7 @@ def register_recommendations_routes(app):
                             'horizon_top_picks': horizon_top_picks,
                             'strength_spotlight': strength_spotlight,
                             'strategy_framework': strategy_framework,
+                            'market_model_status': market_model_status,
                             'source': 'live_stock_fallback'
                         },
                         'timestamp': datetime.now().isoformat()
@@ -2255,6 +2361,12 @@ def register_recommendations_routes(app):
             if total_count == 0 and query_type in ['a_stock', 'hk_stock', 'us_stock'] and keyword and offset == 0:
                 stock_fallback = _build_stock_search_fallback(session, query_type, keyword, limit=limit, probability_health=probability_health)
                 if stock_fallback:
+                    stock_fallback = _apply_trust_aware_sort(
+                        stock_fallback,
+                        sort_by=sort_by,
+                        order=order,
+                        market_model_status=market_model_status,
+                    )
                     portfolio_advice = recommender._build_portfolio_advice(stock_fallback)
                     horizon_top_picks = _build_horizon_top_picks(stock_fallback)
                     strength_spotlight = _build_strength_spotlight(stock_fallback)
@@ -2280,6 +2392,7 @@ def register_recommendations_routes(app):
                             'horizon_top_picks': horizon_top_picks,
                             'strength_spotlight': strength_spotlight,
                             'strategy_framework': strategy_framework,
+                            'market_model_status': market_model_status,
                             'source': 'stock_search_fallback'
                         },
                         'timestamp': datetime.now().isoformat()
@@ -2288,6 +2401,12 @@ def register_recommendations_routes(app):
             if total_count == 0 and query_type == 'active_fund' and keyword and offset == 0:
                 holding_fallback = _build_active_fund_holding_fallback(session, keyword, limit=limit)
                 if holding_fallback:
+                    holding_fallback = _apply_trust_aware_sort(
+                        holding_fallback,
+                        sort_by=sort_by,
+                        order=order,
+                        market_model_status=market_model_status,
+                    )
                     portfolio_advice = recommender._build_portfolio_advice(holding_fallback)
                     horizon_top_picks = _build_horizon_top_picks(holding_fallback)
                     strength_spotlight = _build_strength_spotlight(holding_fallback)
@@ -2310,6 +2429,7 @@ def register_recommendations_routes(app):
                             'horizon_top_picks': horizon_top_picks,
                             'strength_spotlight': strength_spotlight,
                             'strategy_framework': strategy_framework,
+                            'market_model_status': market_model_status,
                             'source': 'holding_fallback'
                         },
                         'timestamp': datetime.now().isoformat()
@@ -2356,6 +2476,12 @@ def register_recommendations_routes(app):
                         item['strength'] = _classify_recommendation_strength(item)
                         _apply_holding_recommendation(item, asset_type=query_type)
                         recommendations_list.append(item)
+                    recommendations_list = _apply_trust_aware_sort(
+                        recommendations_list,
+                        sort_by=sort_by,
+                        order=order,
+                        market_model_status=market_model_status,
+                    )
 
                     portfolio_advice = recommender._build_portfolio_advice(recommendations_list)
                     horizon_top_picks = _build_horizon_top_picks(recommendations_list)
@@ -2378,6 +2504,7 @@ def register_recommendations_routes(app):
                             'horizon_top_picks': horizon_top_picks,
                             'strength_spotlight': strength_spotlight,
                             'strategy_framework': strategy_framework,
+                            'market_model_status': market_model_status,
                             'source': 'live_fallback'
                         },
                         'timestamp': datetime.now().isoformat()
@@ -2386,7 +2513,6 @@ def register_recommendations_routes(app):
                     logger.warning(f"基金实时回退失败: {e}")
             
             recommendations_list = []
-            market_model_status = _build_asset_model_status(query_type, probability_health)
             short_term_source = market_model_status.get('short_term_source', 'rule_fallback')
             short_term_validated = market_model_status.get('short_term_validated', False)
             for rec in recommendations:
@@ -2439,6 +2565,12 @@ def register_recommendations_routes(app):
                 item['market_model_reliability'] = market_model_status.get('market_model_reliability', {})
                 _apply_holding_recommendation(item, asset_type=query_type)
                 recommendations_list.append(item)
+            recommendations_list = _apply_trust_aware_sort(
+                recommendations_list,
+                sort_by=sort_by,
+                order=order,
+                market_model_status=market_model_status,
+            )
             
             portfolio_advice = recommender._build_portfolio_advice(recommendations_list)
             horizon_top_picks = _build_horizon_top_picks(recommendations_list)
@@ -2462,7 +2594,8 @@ def register_recommendations_routes(app):
                     'portfolio_advice': portfolio_advice,
                     'horizon_top_picks': horizon_top_picks,
                     'strength_spotlight': strength_spotlight,
-                    'strategy_framework': strategy_framework
+                    'strategy_framework': strategy_framework,
+                    'market_model_status': market_model_status,
                 },
                 'timestamp': datetime.now().isoformat()
             })

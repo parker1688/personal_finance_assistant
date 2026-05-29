@@ -180,21 +180,36 @@ function loadRecentReviews() {
         if (r.code===200 && r.data && r.data.length) {
             let html = '';
             for (const item of r.data) {
-                const isPending = item.status === 'pending' || item.is_direction_correct === null;
-                const isCorrect = item.is_direction_correct;
-                const actualText = isPending ? '待验证' : (item.actual_direction === 'up' ? '上涨' : '下跌');
-                const actualCls = isPending ? 'text-muted' : (isCorrect ? 'text-success' : 'text-danger');
-                const resultTag = isPending ? '<span class="badge bg-secondary">待验证</span>' : (isCorrect ? '<span class="badge-low">准确</span>' : '<span class="badge-high">错误</span>');
-                const predictedText = item.predicted_direction ? (item.predicted_direction === 'up' ? '上涨' : '下跌') : ((Number(item.predicted_up_prob || 50) >= 50) ? '上涨' : '下跌');
-                html += `<tr>
-                    <td>${item.expiry_date || item.reviewed_at}</td>
-                    <td><strong>${escapeHtml(item.name || item.code)}</strong></td>
-                    <td>${item.period_days}日</td>
-                    <td>${predictedText}</td>
-                    <td class="${actualCls}">${actualText}</td>
-                    <td>${resultTag}</td>
-                    <td class="small">${escapeHtml(item.error_analysis || '-')}</td>
-                </tr>`;
+                if (item.status === 'trade_reviewed') {
+                    const isProfit = item.is_direction_correct;
+                    const pnlCls = isProfit ? 'text-success' : 'text-danger';
+                    const triggerText = escapeHtml(item.error_analysis || '-');
+                    html += `<tr class="table-info" style="border-left:3px solid #0dcaf0;">
+                        <td>${item.expiry_date || item.reviewed_at}</td>
+                        <td><strong>${escapeHtml(item.name || item.code)}</strong><br><span class="badge bg-info text-dark" style="font-size:0.7em;">即时成交复盘</span></td>
+                        <td>持仓${item.period_days}日</td>
+                        <td>--</td>
+                        <td class="${pnlCls}">${isProfit ? '盈利' : '亏损'}</td>
+                        <td><span class="badge" style="background:#0dcaf0;color:#000;">已结算</span></td>
+                        <td class="small">${triggerText}</td>
+                    </tr>`;
+                } else {
+                    const isPending = item.status === 'pending' || item.is_direction_correct === null;
+                    const isCorrect = item.is_direction_correct;
+                    const actualText = isPending ? '待验证' : (item.actual_direction === 'up' ? '上涨' : '下跌');
+                    const actualCls = isPending ? 'text-muted' : (isCorrect ? 'text-success' : 'text-danger');
+                    const resultTag = isPending ? '<span class="badge bg-secondary">待验证</span>' : (isCorrect ? '<span class="badge-low">准确</span>' : '<span class="badge-high">错误</span>');
+                    const predictedText = item.predicted_direction ? (item.predicted_direction === 'up' ? '上涨' : '下跌') : ((Number(item.predicted_up_prob || 50) >= 50) ? '上涨' : '下跌');
+                    html += `<tr>
+                        <td>${item.expiry_date || item.reviewed_at}</td>
+                        <td><strong>${escapeHtml(item.name || item.code)}</strong></td>
+                        <td>${item.period_days}日</td>
+                        <td>${predictedText}</td>
+                        <td class="${actualCls}">${actualText}</td>
+                        <td>${resultTag}</td>
+                        <td class="small">${escapeHtml(item.error_analysis || '-')}</td>
+                    </tr>`;
+                }
             }
             $('#recentReviewsList').html(html);
         } else { $('#recentReviewsList').html('<tr><td colspan="7" class="text-center">暂无复盘记录</td></tr>'); }

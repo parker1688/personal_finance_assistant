@@ -108,7 +108,14 @@ def _forbidden_response(message: str):
     }), 403
 
 
-def require_admin_access(view_func: Optional[Callable] = None, *, action: str = 'admin_operation'):
+def require_admin_access(
+    view_func: Optional[Callable] = None,
+    *,
+    action: str = 'admin_operation',
+    audit_success: bool = True,
+    audit_denied: bool = True,
+    allow_local_with_key: bool = False,
+):
     """保护高风险管理接口。"""
 
     def decorator(func: Callable):
@@ -116,21 +123,29 @@ def require_admin_access(view_func: Optional[Callable] = None, *, action: str = 
         def wrapper(*args, **kwargs):
             configured_key = get_admin_api_key()
             provided_key = _extract_provided_key()
-            client_ip = _get_client_ip() or 'unknown'
 
             if configured_key:
                 if provided_key and secrets.compare_digest(provided_key, configured_key):
-                    log_admin_audit(action, 'granted', 'admin_key', level='INFO')
+                    if audit_success:
+                        log_admin_audit(action, 'granted', 'admin_key', level='INFO')
                     return func(*args, **kwargs)
 
-                log_admin_audit(action, 'denied', 'missing_or_invalid_key', level='WARNING')
+                if allow_local_with_key and _allow_local_bypass() and is_local_request():
+                    if audit_success:
+                        log_admin_audit(action, 'granted', 'local_bypass_with_key', level='INFO')
+                    return func(*args, **kwargs)
+
+                if audit_denied:
+                    log_admin_audit(action, 'denied', 'missing_or_invalid_key', level='WARNING')
                 return _forbidden_response('该操作需要管理员凭证')
 
             if _allow_local_bypass() and is_local_request():
-                log_admin_audit(action, 'granted', 'local_bypass', level='INFO')
+                if audit_success:
+                    log_admin_audit(action, 'granted', 'local_bypass', level='INFO')
                 return func(*args, **kwargs)
 
-            log_admin_audit(action, 'denied', 'no_key_configured', level='WARNING')
+            if audit_denied:
+                log_admin_audit(action, 'denied', 'no_key_configured', level='WARNING')
             return _forbidden_response('该操作需要管理员凭证，请配置 ADMIN_API_KEY 或从本机访问')
 
         return wrapper

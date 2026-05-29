@@ -75,6 +75,12 @@ class StockCollector:
             if base.startswith(('4', '8', '9')):
                 return base + '.BJ'
             return code
+        # AkShare 港股常见 5 位前导零代码（如 00068.HK），
+        # yfinance 更常用 4 位格式（0068.HK），这里统一兼容。
+        if code.endswith('.HK'):
+            base = code[:-3]
+            if base.isdigit() and len(base) == 5 and base.startswith('0'):
+                return base[-4:] + '.HK'
         return code
 
     @staticmethod

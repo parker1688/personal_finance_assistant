@@ -305,6 +305,9 @@ class ETFTrainer:
 
             future_return = (close[i + horizon] - close[i]) / close[i]
             label_threshold = 0.003 if horizon <= 5 else (0.006 if horizon <= 20 else 0.012)
+            # 中性区过滤：排除绝对收益小于阈值的噪声样本，中长期模型效果较显著
+            if horizon > 5 and abs(future_return) < label_threshold:
+                continue
             label = 1 if future_return > label_threshold else 0
 
             X_list.append(list(features.values()))
@@ -391,13 +394,13 @@ class ETFTrainer:
             model = xgb.XGBClassifier(
                 n_estimators=110 if horizon <= 20 else 150,
                 max_depth=2 if horizon <= 20 else 3,
-                learning_rate=0.05 if horizon <= 20 else 0.04,
-                subsample=0.75,
-                colsample_bytree=0.75,
-                min_child_weight=8,
-                gamma=0.3,
-                reg_lambda=6.0,
-                reg_alpha=0.8,
+                learning_rate=0.04 if horizon <= 20 else 0.03,
+                subsample=0.70,
+                colsample_bytree=0.70,
+                min_child_weight=12 if horizon <= 20 else 8,
+                gamma=0.5 if horizon <= 20 else 0.3,
+                reg_lambda=10.0 if horizon <= 20 else 6.0,
+                reg_alpha=1.5,
                 scale_pos_weight=neg / pos,
                 random_state=42,
                 eval_metric='logloss',

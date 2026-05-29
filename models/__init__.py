@@ -504,18 +504,190 @@ class LearningInsight(Base):
     )
 
 
+# ==================== 模拟交易员表 ====================
+
+class SimulatedTraderConfig(Base):
+    """模拟交易员配置表"""
+    __tablename__ = 'simulated_trader_config'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trader_id = Column(String(50), nullable=False, unique=True, comment='交易员ID')
+    initial_capital = Column(Float, nullable=False, default=1_000_000.0, comment='初始本金(元)')
+    current_cash = Column(Float, nullable=False, default=1_000_000.0, comment='当前现金(元)')
+    buy_score_threshold = Column(Float, nullable=False, default=0.6, comment='买入评分阈值')
+    sell_score_threshold = Column(Float, nullable=False, default=0.4, comment='卖出评分阈值')
+    stop_loss_pct = Column(Float, nullable=False, default=0.08, comment='止损比例(0.08=8%)')
+    take_profit_pct = Column(Float, nullable=False, default=0.20, comment='止盈比例(0.20=20%)')
+    max_position_count = Column(Integer, nullable=False, default=15, comment='最大持仓品种数')
+    max_single_position_pct = Column(Float, nullable=False, default=0.05, comment='单笔最大仓位比例')
+    min_cash_reserve_pct = Column(Float, nullable=False, default=0.25, comment='最低现金保留比例')
+    max_hold_days = Column(Integer, nullable=False, default=60, comment='最长持仓天数')
+    is_active = Column(Boolean, default=True, comment='是否启用')
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_trader_id', 'trader_id'),
+    )
+
+
+class SimulatedPortfolio(Base):
+    """模拟交易员持仓表"""
+    __tablename__ = 'simulated_portfolio'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trader_id = Column(String(50), nullable=False, comment='交易员ID')
+    code = Column(String(20), nullable=False, comment='标的代码')
+    name = Column(String(100), comment='标的名称')
+    asset_type = Column(String(20), nullable=False, comment='资产类型(a_stock/etf/active_fund/gold/silver)')
+    shares = Column(Float, nullable=False, comment='持有数量/份数')
+    cost_price = Column(Float, nullable=False, comment='平均成本价(元)')
+    current_price = Column(Float, comment='最新价格(元)')
+    market_value = Column(Float, comment='当前市值(元)')
+    unrealized_pnl = Column(Float, comment='浮动盈亏(元)')
+    unrealized_pnl_pct = Column(Float, comment='浮动盈亏比例(%)')
+    buy_date = Column(Date, nullable=False, comment='首次买入日期')
+    last_signal_date = Column(Date, comment='最后一次推荐信号日期')
+    hold_days = Column(Integer, default=0, comment='已持有天数')
+    source_recommendation_id = Column(Integer, comment='触发买入的推荐ID')
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+
+    __table_args__ = (
+        Index('idx_portfolio_trader', 'trader_id'),
+        Index('idx_portfolio_code', 'trader_id', 'code'),
+    )
+
+
+class SimulatedTrade(Base):
+    """模拟交易流水表"""
+    __tablename__ = 'simulated_trades'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trader_id = Column(String(50), nullable=False, comment='交易员ID')
+    trade_date = Column(Date, nullable=False, comment='成交日期(T+1开盘日)')
+    signal_date = Column(Date, nullable=False, comment='信号产生日期(T日)')
+    code = Column(String(20), nullable=False, comment='标的代码')
+    name = Column(String(100), comment='标的名称')
+    asset_type = Column(String(20), nullable=False, comment='资产类型')
+    action = Column(String(10), nullable=False, comment='操作(buy/sell)')
+    shares = Column(Float, nullable=False, comment='成交数量')
+    price = Column(Float, nullable=False, comment='成交价(元)')
+    amount = Column(Float, nullable=False, comment='成交金额(元)')
+    trigger = Column(String(30), nullable=False, comment='触发原因(signal/stop_loss/take_profit/score_drop/timeout)')
+    signal_score = Column(Float, comment='触发时推荐评分')
+    pnl = Column(Float, comment='本次交易盈亏(仅sell有效)(元)')
+    pnl_pct = Column(Float, comment='本次交易盈亏比例(仅sell有效)(%)')
+    source_recommendation_id = Column(Integer, comment='推荐ID')
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_trade_trader_date', 'trader_id', 'trade_date'),
+        Index('idx_trade_code', 'trader_id', 'code'),
+    )
+
+
+class SimulatedDailyPnl(Base):
+    """模拟交易员每日净值快照表"""
+    __tablename__ = 'simulated_daily_pnl'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trader_id = Column(String(50), nullable=False, comment='交易员ID')
+    pnl_date = Column(Date, nullable=False, comment='日期')
+    total_value = Column(Float, nullable=False, comment='总资产(元)')
+    cash = Column(Float, nullable=False, comment='现金(元)')
+    positions_value = Column(Float, nullable=False, comment='持仓市值(元)')
+    daily_return = Column(Float, comment='当日收益率(%)')
+    total_return = Column(Float, comment='累计收益率(%)')
+    max_drawdown = Column(Float, comment='截至当日最大回撤(%)')
+    position_count = Column(Integer, comment='持仓品种数')
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_daily_pnl_trader_date', 'trader_id', 'pnl_date', unique=True),
+    )
+
+
+class SimulatedDecisionLog(Base):
+    """模拟交易员决策思考日志表"""
+    __tablename__ = 'simulated_decision_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trader_id = Column(String(50), nullable=False, comment='交易员ID')
+    signal_date = Column(Date, nullable=False, comment='信号日期')
+    code = Column(String(20), nullable=False, comment='标的代码')
+    name = Column(String(100), comment='标的名称')
+    asset_type = Column(String(20), nullable=False, comment='资产类型')
+    decision_type = Column(String(10), nullable=False, comment='决策类型(buy/sell/hold/reject)')
+    decision_score = Column(Float, comment='最终决策分(0-1)')
+    pred_score = Column(Float, comment='预测可靠度分(0-1)')
+    rec_score = Column(Float, comment='推荐质量分(0-1)')
+    risk_score = Column(Float, comment='风险约束分(0-1)')
+    portfolio_score = Column(Float, comment='组合匹配分(0-1)')
+    ai_confidence = Column(Float, comment='AI置信度(%)')
+    recommendation_score = Column(Float, comment='推荐原始评分')
+    recommended_action = Column(String(20), comment='AI推荐动作')
+    final_action = Column(String(20), comment='交易员最终动作')
+    reasons_text = Column(Text, comment='决策理由文本')
+    source_recommendation_id = Column(Integer, comment='推荐ID')
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_decision_trader_date', 'trader_id', 'signal_date'),
+        Index('idx_decision_code', 'trader_id', 'code'),
+    )
+
+
+# ==================== 持仓操作记录表 ====================
+
+class HoldingAction(Base):
+    """管理员对持仓执行的操作记录（加仓/减仓/清仓/持有），用于后续复盘"""
+    __tablename__ = 'holding_actions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    holding_code = Column(String(20), nullable=False, comment='持仓代码')
+    holding_name = Column(String(100), comment='持仓名称')
+    asset_type = Column(String(20), comment='资产类型')
+
+    # AI 建议
+    ai_suggestion = Column(String(20), comment='AI建议动作(加仓/减仓/清仓/持有)')
+    ai_reason = Column(Text, comment='AI建议理由')
+    ai_level = Column(String(10), comment='AI风险等级(high/medium/low)')
+
+    # 管理员实际操作
+    actual_action = Column(String(20), nullable=False, comment='实际执行动作(加仓/减仓/清仓/持有/跳过)')
+    quantity_changed = Column(Float, comment='变更数量(加仓正数/减仓负数/清仓为0=全部)')
+    price_at_action = Column(Float, comment='操作时参考价格')
+    notes = Column(Text, comment='操作备注')
+    operated_at = Column(DateTime, default=datetime.now, comment='操作时间')
+
+    # 复盘信息
+    review_status = Column(String(20), default='pending', comment='复盘状态(pending/reviewed)')
+    review_outcome = Column(String(20), comment='复盘结论(profit/loss/neutral)')
+    review_notes = Column(Text, comment='复盘备注')
+    reviewed_at = Column(DateTime, comment='复盘时间')
+
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+
+    __table_args__ = (
+        Index('idx_holding_action_code', 'holding_code'),
+        Index('idx_holding_action_time', 'operated_at'),
+        Index('idx_holding_action_review', 'review_status'),
+    )
+
+
 # ==================== 工具函数 ====================
 
 def init_database():
     """初始化数据库，创建所有表"""
     Base.metadata.create_all(engine)
-    print("✅ 数据库表创建完成")
+    print("[OK] 数据库表创建完成")
     
     # 打印所有表名
     from sqlalchemy import inspect
     inspector = inspect(engine)
     tables = inspector.get_table_names()
-    print(f"📊 已创建 {len(tables)} 个表: {', '.join(tables)}")
+    print(f"[INFO] 已创建 {len(tables)} 个表: {', '.join(tables)}")
 
 
 def get_session():
@@ -528,7 +700,7 @@ def drop_all_tables():
     confirm = input("⚠️ 确定要删除所有表吗？这将丢失所有数据！(yes/no): ")
     if confirm.lower() == 'yes':
         Base.metadata.drop_all(engine)
-        print("✅ 所有表已删除")
+        print("[OK] 所有表已删除")
     else:
         print("操作已取消")
 
@@ -559,7 +731,7 @@ if __name__ == '__main__':
     
     try:
         init_database()
-        print("\n✅ 数据库初始化成功！")
+        print("\n[OK] 数据库初始化成功！")
         
         # 显示表统计
         stats = get_model_count()

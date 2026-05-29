@@ -29,6 +29,7 @@ try:
     get_collection_director = _scheduler_module.get_collection_director
     generate_daily_predictions = _scheduler_module.generate_daily_predictions
     rebuild_today_recommendations = _scheduler_module.rebuild_today_recommendations
+    rebuild_recommendations_for_date = _scheduler_module.rebuild_recommendations_for_date
     generate_daily_recommendations = _scheduler_module.generate_daily_recommendations
     auto_backfill_current_year = _scheduler_module.auto_backfill_current_year
     start_auto_backfill_current_year_async = _scheduler_module.start_auto_backfill_current_year_async
@@ -50,6 +51,7 @@ try:
         'get_collection_director',
         'generate_daily_predictions',
         'rebuild_today_recommendations',
+        'rebuild_recommendations_for_date',
         'generate_daily_recommendations',
         'auto_backfill_current_year',
         'start_auto_backfill_current_year_async',

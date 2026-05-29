@@ -337,7 +337,9 @@ function loadDatasetInventory() {
             const rows = r.data.map(item => {
                 const badgeClass = item.status === 'ready'
                     ? 'success'
-                    : (item.status === 'empty' ? 'warning text-dark' : 'secondary');
+                    : (item.status === 'empty'
+                        ? 'warning text-dark'
+                        : (item.status === 'source_lag' ? 'info text-dark' : 'secondary'));
                 const actionHtml = (item.collectable && item.collect_key)
                     ? `<button class="btn btn-sm btn-${item.status === 'ready' ? 'outline-secondary' : 'outline-primary'} single-collect-btn" data-key="${escapeHtml(item.collect_key)}" data-name="${escapeHtml(item.name || '')}">
                             <i class="fas fa-cloud-arrow-down"></i> ${escapeHtml(item.collect_action_text || '单独采集')}

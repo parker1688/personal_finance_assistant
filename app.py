@@ -18,6 +18,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from config import SECRET_KEY, DEBUG, HOST, PORT, SQLITE_PATH
 from models import init_database, get_session
 from utils import get_logger, ensure_dir
+from api.auth import require_admin_access
 
 # 初始化日志
 logger = get_logger(__name__)
@@ -187,6 +188,13 @@ def reflection():
     return render_template('reflection.html', active_page='reflection')
 
 
+@app.route('/simulated-trader')
+@require_admin_access(action='simulated_trader.page', audit_success=False, allow_local_with_key=True)
+def simulated_trader_page():
+    """模拟交易员页面"""
+    return render_template('simulated_trader.html', active_page='simulated_trader')
+
+
 # ==================== 静态文件服务 ====================
 
 @app.route('/static/<path:filename>')
@@ -232,6 +240,7 @@ def register_api_routes(app):
         ('api.model', 'register_model_routes'),
         ('api.logs', 'register_logs_routes'),
         ('api.backfill', 'register_backfill_routes'),
+        ('api.simulated_trader', 'register_simulated_trader_routes'),
     ]
     
     for module_name, func_name in routes_to_register:

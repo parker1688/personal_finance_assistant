@@ -33,7 +33,7 @@
             <div class="stat-card">
                 <div class="stat-value" id="warningCount">--</div>
                 <div class="stat-label">今日预警</div>
-                <div class="stat-trend"><span id="highWarningCount">0</span> 高风险 · <span id="mediumWarningCount">0</span> 中风险</div>
+                <div class="stat-trend"><span id="highWarningCount">0</span> 高风险 · <span id="mediumWarningCount">0</span> 中风险 · <span id="lowWarningCount">0</span> 低风险</div>
             </div>
         </div>
         <div class="col-md-3 col-sm-6 mb-3">
@@ -138,6 +138,23 @@ function riskPillClass(level) {
     return 'pill-green';
 }
 
+function warningBadge(level) {
+    if (level === 'high') return { className: 'badge-high', text: '高风险' };
+    if (level === 'medium') return { className: 'badge-medium', text: '中风险' };
+    return { className: 'badge-low', text: '低风险' };
+}
+
+function valuationBasisText(portfolio) {
+    if (!portfolio) return '口径未标注';
+    if (portfolio.valuation_basis === 'snapshot') {
+        return portfolio.snapshot_date ? `按最新快照市值 (${portfolio.snapshot_date})` : '按最新快照市值';
+    }
+    if (portfolio.valuation_basis === 'mixed') {
+        return portfolio.snapshot_date ? `快照与成本混合口径 (${portfolio.snapshot_date})` : '快照与成本混合口径';
+    }
+    return '按成本口径估算';
+}
+
 function loadDashboardData() {
     $.ajax({
         url: '/api/dashboard/summary',
@@ -152,6 +169,7 @@ function loadDashboardData() {
                 $('#warningCount').text(data.today_warnings.total);
                 $('#highWarningCount').text(data.today_warnings.high);
                 $('#mediumWarningCount').text(data.today_warnings.medium);
+                $('#lowWarningCount').text(data.today_warnings.low || 0);
                 $('#recommendCount').text(data.today_recommendations.total);
                 $('#recommendBatchInfo').text(data.recommendation_batch_date ? `最新批次 ${data.recommendation_batch_date}` : '暂无推荐快照');
                 $('#accuracyRate').text(data.has_review_data && data.overall_accuracy !== null ? data.overall_accuracy + '%' : '--%');
@@ -200,32 +218,34 @@ function loadDashboardData() {
                         <span class="insight-pill pill-green">健康分 ${portfolio.health_score ?? '--'}</span>
                     </div>
                     <div class="mt-2">${escapeHtml(portfolio.summary || '暂无组合建议')}</div>
-                    <div class="mt-2 text-muted">持仓 ${portfolio.holding_count ?? 0} 项 · 建议现金 ${portfolio.recommended_cash_ratio_pct ?? 25}%</div>
+                    <div class="mt-2 text-muted">持仓 ${portfolio.holding_count ?? 0} 项 · 建议现金 ${portfolio.recommended_cash_ratio_pct ?? 25}% · ${escapeHtml(valuationBasisText(portfolio))}</div>
                 `);
 
                 const model = data.model_health || {};
                 const modelRows = Array.isArray(model.models) ? model.models : [];
+                const assetGroups = Array.isArray(model.asset_groups) ? model.asset_groups : [];
                 $('#modelHealthBox').html(`
                     <div>
                         <span class="insight-pill ${riskPillClass(model.overall_status)}">${model.overall_status === 'healthy' ? '健康' : (model.overall_status === 'warning' ? '预警' : '风险')}</span>
                         <span class="insight-pill pill-blue">${model.passed_count ?? 0}/${model.total_models ?? 0} 通过</span>
                     </div>
-                    <div class="mt-2">${modelRows.map(item => `<div>${item.period_days}日：${item.passed ? '通过' : '待优化'}${item.accuracy != null ? ` · Acc ${(Number(item.accuracy) * 100).toFixed(1)}%` : ''}</div>`).join('') || '暂无模型评估数据'}</div>
-                    <div class="mt-2 text-muted">状态 ${model.overall_status === 'healthy' ? '稳定可用' : (model.overall_status === 'warning' ? '建议观察' : '建议降权使用')}</div>
+                    <div class="mt-2">${assetGroups.map(group => `<div><strong>${escapeHtml(group.label)}</strong>：${group.passed_count}/${group.total_models} 通过</div>`).join('') || '暂无模型评估数据'}</div>
+                    <div class="mt-2 text-muted">${modelRows.filter(item => !item.passed).slice(0, 4).map(item => `${item.label} 未通过`).join('；') || (model.overall_status === 'healthy' ? '全部资产运行时模型均已通过' : '建议继续排查未通过模型')}</div>
                 `);
 
                 const backtest = data.action_backtest || {};
                 const hasBacktestSamples = !!backtest.has_action_samples;
+                const isReliableBacktest = !!backtest.is_reliable;
                 const backtestGrade = backtest.overall_grade || 'N/A';
-                const backtestPill = hasBacktestSamples
+                const backtestPill = (hasBacktestSamples && isReliableBacktest)
                     ? riskPillClass(backtestGrade === 'A' || backtestGrade === 'B' ? 'low' : (backtestGrade === 'C' ? 'medium' : 'high'))
                     : 'pill-blue';
                 $('#actionBacktestBox').html(`
                     <div>
-                        <span class="insight-pill ${backtestPill}">${hasBacktestSamples ? `评级 ${backtestGrade}` : '样本积累中'}</span>
-                        <span class="insight-pill pill-blue">${hasBacktestSamples ? `综合 ${(backtest.overall_accuracy ?? 0)}%` : `样本 ${backtest.sample_size || 0}`}</span>
+                        <span class="insight-pill ${backtestPill}">${(hasBacktestSamples && isReliableBacktest) ? `评级 ${backtestGrade}` : '样本有限'}</span>
+                        <span class="insight-pill pill-blue">样本 ${backtest.sample_size || 0}${(hasBacktestSamples && isReliableBacktest) ? ` · 综合 ${(backtest.overall_accuracy ?? 0)}%` : ''}</span>
                     </div>
-                    <div class="mt-2">${hasBacktestSamples ? `止盈 ${backtest.take_profit_grade || 'N/A'} · 加仓 ${backtest.add_signal_grade || 'N/A'}` : '已开启自动验证，等待更多到期预测形成回测结果'}</div>
+                    <div class="mt-2">${(hasBacktestSamples && isReliableBacktest) ? `止盈 ${backtest.take_profit_grade || 'N/A'} · 加仓 ${backtest.add_signal_grade || 'N/A'}` : escapeHtml(backtest.sample_note || '已开启自动验证，等待更多到期预测形成回测结果')}</div>
                     <div class="mt-2 text-muted">${escapeHtml(backtest.recommendation || '暂无动作回测数据')}</div>
                 `);
                 
@@ -233,14 +253,13 @@ function loadDashboardData() {
                 if (data.recent_warnings && data.recent_warnings.length > 0) {
                     let html = '';
                     for (const w of data.recent_warnings) {
-                        const levelClass = w.level === 'high' ? 'badge-high' : 'badge-medium';
-                        const levelText = w.level === 'high' ? '高风险' : '中风险';
+                        const badge = warningBadge(w.level);
                         html += `<tr>
                             <td>${w.time}</td>
                             <td><strong>${escapeHtml(w.name)}</strong><br><small class="text-muted">${w.code}</small></td>
                             <td>${w.type}</td>
                             <td>${escapeHtml(w.message)}</td>
-                            <td><span class="${levelClass}">${levelText}</span></td>
+                            <td><span class="${badge.className}">${badge.text}</span></td>
                         </tr>`;
                     }
                     $('#warningList').html(html);
@@ -253,8 +272,18 @@ function loadDashboardData() {
                 accuracyChart = echarts.init(document.getElementById('accuracyChart'));
                 const dates = data.accuracy_trend.map(item => item.date);
                 const accuracies = data.accuracy_trend.map(item => item.accuracy);
+                const accuracySamples = data.accuracy_trend.map(item => item.sample_count || 0);
                 accuracyChart.setOption({
-                    tooltip: { trigger: 'axis' },
+                    tooltip: {
+                        trigger: 'axis',
+                        formatter: function(params) {
+                            const idx = params && params.length ? params[0].dataIndex : 0;
+                            const value = accuracies[idx];
+                            const sampleCount = accuracySamples[idx];
+                            const valueText = value == null ? '无样本' : `${value}%`;
+                            return `${dates[idx]}<br/>准确率: ${valueText}<br/>样本数: ${sampleCount}`;
+                        }
+                    },
                     grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
                     xAxis: { type: 'category', data: dates, axisLabel: { rotate: 45 } },
                     yAxis: { type: 'value', name: '准确率 (%)', min: 0, max: 100 },

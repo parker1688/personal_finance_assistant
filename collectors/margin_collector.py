@@ -119,17 +119,29 @@ class MarginCollector:
             start_date = start_date.strftime('%Y%m%d')
         if hasattr(end_date, 'strftime'):
             end_date = end_date.strftime('%Y%m%d')
-        
+
+        # 优先使用交易所交易日历，避免把法定节假日误判为交易日。
+        if self.pro is not None:
+            try:
+                cal = self.pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date)
+                if cal is not None and len(cal) > 0:
+                    if 'is_open' in cal.columns and 'cal_date' in cal.columns:
+                        open_days = cal[cal['is_open'] == 1]['cal_date'].astype(str).tolist()
+                        if open_days:
+                            return sorted(open_days)
+            except Exception as e:
+                logger.warning(f"trade_cal 获取失败，回退工作日逻辑: {e}")
+
         start_dt = datetime.strptime(start_date, '%Y%m%d')
         end_dt = datetime.strptime(end_date, '%Y%m%d')
-        
+
         date_list = []
         current = start_dt
         while current <= end_dt:
             if current.weekday() < 5:
                 date_list.append(current.strftime('%Y%m%d'))
             current += timedelta(days=1)
-        
+
         return date_list
     
     def collect_by_date(self, start_date, end_date, resume=True):
@@ -190,16 +202,25 @@ class MarginCollector:
                 # 采集融资融券日数据
                 df = self.pro.margin(trade_date=trade_date)
                 
-                if df is not None and len(df) > 0:
+                has_rows = df is not None and len(df) > 0
+
+                if has_rows:
                     appended = self._append_to_output(df)
                     new_count += appended
                     total_rows += appended
                     print(f"✅ {appended}条")
                 else:
                     print(f"⚠️ 无数据")
-                
-                # 标记完成
-                self._mark_date_completed(trade_date, progress)
+
+                # 标记完成策略：
+                # 1) 有数据则完成；
+                # 2) 无数据且日期较旧（>2天）则完成，避免历史空窗反复重试；
+                # 3) 无数据且近期日期不标记，留给后续自动重试。
+                cutoff = (datetime.now() - timedelta(days=2)).strftime('%Y%m%d')
+                if has_rows or trade_date < cutoff:
+                    self._mark_date_completed(trade_date, progress)
+                else:
+                    logger.info(f"margin day={trade_date} empty_recent_day skip_mark_completed")
 
                 elapsed = time.perf_counter() - day_start
                 logger.info(

@@ -13,6 +13,7 @@ import importlib.util
 import types
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 import pandas as pd
 import numpy as np
 
@@ -37,8 +38,9 @@ from api.model import _select_current_model_version
 from api import model as model_api_module
 from api import logs as logs_api_module
 from api import reviews as reviews_api_module
+from api import dashboard as dashboard_api_module
 from api.reviews import _extract_version_metrics
-from api.dashboard import _build_advisor_workflow
+from api.dashboard import _build_advisor_workflow, _build_advisor_brief
 from api.recommendations import (
     _build_horizon_top_picks,
     _build_holding_recommendation,
@@ -49,6 +51,7 @@ from api.recommendations import (
     _build_recommendation_advisor_payload,
     _build_asset_model_status,
     _classify_recommendation_strength,
+    _apply_trust_aware_sort,
 )
 
 
@@ -340,9 +343,10 @@ class TestFundAndModelHelpers(unittest.TestCase):
                     'existing_models': [],
                     'missing_models': [],
                 }],
-                run_training_plan=lambda plan, dry_run=False, stop_on_error=False, skip_existing=False, enable_self_optimization=True: captured.update({
+                run_training_plan=lambda plan, dry_run=False, stop_on_error=False, skip_existing=False, enable_self_optimization=True, progress_file=None: captured.update({
                     'plan': plan,
                     'enable_self_optimization': enable_self_optimization,
+                    'progress_file': progress_file,
                 }) or [{'asset_type': 'etf', 'status': 'success'}],
             )
 
@@ -362,6 +366,7 @@ class TestFundAndModelHelpers(unittest.TestCase):
             self.assertEqual(captured['only_assets'], ['etf', 'us_stock'])
             self.assertEqual(captured['periods'], [5])
             self.assertFalse(captured['enable_self_optimization'])
+            self.assertIsNotNone(captured['progress_file'])
 
     def test_load_training_progress_reads_runtime_progress_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -481,6 +486,81 @@ class TestDashboardWorkflow(unittest.TestCase):
         self.assertIn('到期复盘', workflow['stages'][2]['title'])
         self.assertIn('303', workflow['stages'][2]['metrics'][1]['value'])
         self.assertEqual(workflow['stages'][1]['status'], 'warning')
+
+    def test_build_advisor_brief_warns_when_model_health_is_not_healthy(self):
+        brief = _build_advisor_brief(
+            market_temp_detail={'temperature': 28.0, 'data_source': 'test-source'},
+            portfolio_overview={'overall_risk': 'medium', 'stance': 'balanced', 'recommended_cash_ratio_pct': 25},
+            model_health={'overall_status': 'warning'},
+            action_backtest={'has_action_samples': True, 'is_reliable': True, 'overall_grade': 'B', 'sample_size': 42},
+            warning_stats={'high': 0, 'medium': 1, 'total': 1},
+            pending_validation_count=12,
+        )
+        self.assertEqual(brief['headline'], '今日建议：市场偏冷，可分批布局')
+        self.assertTrue(any('模型状态仍需观察' in bullet for bullet in brief['bullets']))
+
+    def test_get_model_health_overview_groups_assets_and_failures(self):
+        fake_catalog = [
+            {'asset_type': 'a_stock', 'label': 'A股', 'period_days': 5, 'path': 'a_stock_5.pkl'},
+            {'asset_type': 'a_stock', 'label': 'A股', 'period_days': 20, 'path': 'a_stock_20.pkl'},
+            {'asset_type': 'hk_stock', 'label': '港股', 'period_days': 5, 'path': 'hk_stock_5.pkl'},
+            {'asset_type': 'hk_stock', 'label': '港股', 'period_days': 20, 'path': 'hk_stock_20.pkl'},
+        ]
+
+        fake_bundles = {
+            'a_stock_5.pkl': {'loaded': True, 'gate': 'acc_f1', 'reason': 'passed', 'metadata': {'validation_accuracy': 0.66, 'validation_f1': 0.61}},
+            'a_stock_20.pkl': {'loaded': True, 'gate': 'acc_f1', 'reason': 'passed', 'metadata': {'validation_accuracy': 0.63, 'validation_f1': 0.58}},
+            'hk_stock_5.pkl': {'loaded': False, 'gate': 'failed', 'reason': 'acc=0.46', 'metadata': {'validation_accuracy': 0.46, 'validation_f1': 0.62}},
+            'hk_stock_20.pkl': {'loaded': False, 'gate': 'failed', 'reason': 'acc=0.45', 'metadata': {'validation_accuracy': 0.45, 'validation_f1': 0.61}},
+        }
+
+        def fake_loader(path, period_days=None, allow_legacy=None):
+            return fake_bundles[path]
+
+        with patch.object(dashboard_api_module, '_build_runtime_model_catalog', return_value=fake_catalog), \
+             patch.object(dashboard_api_module._MODEL_MANAGER, 'load_runtime_model_bundle', side_effect=fake_loader):
+            overview = dashboard_api_module._get_model_health_overview()
+
+        self.assertEqual(overview['passed_count'], 2)
+        self.assertEqual(overview['total_models'], 4)
+        self.assertEqual(overview['overall_status'], 'warning')
+        self.assertEqual(overview['asset_groups'][0]['label'], 'A股')
+        self.assertEqual(overview['asset_groups'][0]['status'], 'healthy')
+        self.assertEqual(overview['asset_groups'][1]['label'], '港股')
+        self.assertEqual(overview['asset_groups'][1]['status'], 'risk')
+        failed_labels = [item['label'] for item in overview['models'] if not item['passed']]
+        self.assertEqual(failed_labels, ['港股5日', '港股20日'])
+
+    def test_get_cached_action_backtest_summary_downgrades_small_samples(self):
+        class FakeValidator:
+            def generate_backtest_report(self, days):
+                return {
+                    'overall_accuracy': 100.0,
+                    'action_quality_summary': {
+                        'overall_grade': 'A',
+                        'take_profit_grade': 'A',
+                        'add_signal_grade': 'A',
+                        'has_action_samples': True,
+                        'sample_size': 2,
+                    },
+                    'recommendations': '可以信任建议',
+                }
+
+            def close(self):
+                return None
+
+        dashboard_api_module.dashboard_insight_cache.clear()
+        try:
+            with patch('reviews.backtest_validator.BacktestValidator', return_value=FakeValidator()):
+                summary = dashboard_api_module._get_cached_action_backtest_summary()
+        finally:
+            dashboard_api_module.dashboard_insight_cache.clear()
+
+        self.assertTrue(summary['has_action_samples'])
+        self.assertFalse(summary['is_reliable'])
+        self.assertEqual(summary['sample_size'], 2)
+        self.assertIn('统计稳定性有限', summary['sample_note'])
+        self.assertEqual(summary['recommendation'], '动作回测样本仍偏少，暂不建议据此高权重决策。')
 
 
 class TestRecommendationHorizonHelpers(unittest.TestCase):
@@ -1641,6 +1721,73 @@ class TestAdvisorDecisionLayer(unittest.TestCase):
         self.assertFalse(status['short_term_validated'])
         self.assertEqual(status['short_term_source'], 'rule_fallback')
         self.assertEqual((status['market_model_reliability'] or {}).get('label'), 'guarded')
+
+    def test_apply_trust_aware_sort_downranks_aggressive_signals_in_weak_market(self):
+        weak_status = {
+            'market_model_reliability': {
+                'label': 'guarded',
+                'level': 'low',
+                'passed': False,
+                'score': 32,
+            }
+        }
+        items = [
+            {
+                'code': 'HIGH',
+                'total_score': 4.8,
+                'advisor_action': 'buy',
+                'advisor_confidence': 'high',
+                'risk_level': 'medium',
+                'position_size_pct': 12,
+                'strength': {'level': 'strong_bullish'},
+            },
+            {
+                'code': 'SAFE',
+                'total_score': 4.3,
+                'advisor_action': 'watch',
+                'advisor_confidence': 'low',
+                'risk_level': 'low',
+                'position_size_pct': 0,
+                'strength': {'level': 'neutral_watch'},
+            },
+        ]
+
+        ranked = _apply_trust_aware_sort(items, sort_by='score', order='desc', market_model_status=weak_status)
+        self.assertEqual(ranked[0]['code'], 'SAFE')
+        self.assertEqual(ranked[0]['rank'], 1)
+
+    def test_apply_trust_aware_sort_keeps_score_priority_when_market_is_supportive(self):
+        supportive_status = {
+            'market_model_reliability': {
+                'label': 'supportive',
+                'level': 'high',
+                'passed': True,
+                'score': 86,
+            }
+        }
+        items = [
+            {
+                'code': 'HIGH',
+                'total_score': 4.8,
+                'advisor_action': 'buy',
+                'advisor_confidence': 'high',
+                'risk_level': 'medium',
+                'position_size_pct': 12,
+                'strength': {'level': 'strong_bullish'},
+            },
+            {
+                'code': 'SAFE',
+                'total_score': 4.3,
+                'advisor_action': 'watch',
+                'advisor_confidence': 'low',
+                'risk_level': 'low',
+                'position_size_pct': 0,
+                'strength': {'level': 'neutral_watch'},
+            },
+        ]
+
+        ranked = _apply_trust_aware_sort(items, sort_by='score', order='desc', market_model_status=supportive_status)
+        self.assertEqual(ranked[0]['code'], 'HIGH')
 
     def test_resolve_market_predictor_context_prefers_market_specific_bundle(self):
         recommender = StockRecommender.__new__(StockRecommender)

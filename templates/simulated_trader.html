@@ -1,0 +1,432 @@
+{% extends "base.html" %}
+
+{% block title %}模拟交易员 - 个人AI理财助手{% endblock %}
+{% block page_title %}模拟交易员{% endblock %}
+
+{% block extra_css %}
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+.kpi-card { border-radius: 12px; border: 1px solid #e9ecef; background: #fff; padding: 16px; height: 100%; }
+.kpi-label { color: #6c757d; font-size: 13px; }
+.kpi-value { font-size: 26px; font-weight: 700; line-height: 1.2; margin-top: 8px; }
+.kpi-sub { color: #6c757d; font-size: 12px; margin-top: 6px; }
+.section-card { border: 1px solid #e9ecef; border-radius: 12px; }
+.table thead th { white-space: nowrap; }
+.small-muted { color: #6c757d; font-size: 12px; }
+.health-pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.health-healthy { background: #e8f7ee; color: #198754; }
+.health-warning { background: #fff4e5; color: #b06a00; }
+.health-critical { background: #fdeaea; color: #dc3545; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="small-muted">数据来源：/api/simulated-trader/*（实时）</div>
+        <div class="d-flex align-items-center gap-2">
+            <input id="adminKeyInput" type="password" class="form-control form-control-sm" style="width: 220px;" placeholder="管理员密钥(可选)">
+            <button class="btn btn-outline-secondary btn-sm" onclick="saveAdminKey()"><i class="fas fa-key"></i> 保存密钥</button>
+            <button class="btn btn-outline-info btn-sm" onclick="runHealthCheck()"><i class="fas fa-heart-pulse"></i> 健康检查</button>
+            <button class="btn btn-outline-warning btn-sm" onclick="runArchiveLogs(true)"><i class="fas fa-vial"></i> 归档演练</button>
+            <button class="btn btn-outline-danger btn-sm" onclick="runArchiveLogs(false)"><i class="fas fa-box-archive"></i> 执行归档</button>
+            <button class="btn btn-primary btn-sm" onclick="refreshAll()"><i class="fas fa-rotate"></i> 刷新</button>
+        </div>
+    </div>
+
+    <div class="row mb-3">
+        <div class="col-md-3 mb-3"><div class="kpi-card"><div class="kpi-label">总资产</div><div id="kpiTotal" class="kpi-value">--</div><div class="kpi-sub" id="kpiDate">--</div></div></div>
+        <div class="col-md-3 mb-3"><div class="kpi-card"><div class="kpi-label">现金</div><div id="kpiCash" class="kpi-value">--</div><div class="kpi-sub">当前可用现金</div></div></div>
+        <div class="col-md-3 mb-3"><div class="kpi-card"><div class="kpi-label">持仓市值</div><div id="kpiPos" class="kpi-value">--</div><div class="kpi-sub">当前持仓总市值</div></div></div>
+        <div class="col-md-3 mb-3"><div class="kpi-card"><div class="kpi-label">累计收益率</div><div id="kpiRet" class="kpi-value">--</div><div class="kpi-sub" id="kpiPosCount">--</div></div></div>
+    </div>
+
+    <div class="card section-card mb-4">
+        <div class="card-header bg-white"><i class="fas fa-wave-square"></i> 市场状态与动态策略</div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-lg-4 mb-2"><b>市场状态：</b><span id="marketState">--</span></div>
+                <div class="col-lg-4 mb-2"><b>动态买入阈值：</b><span id="marketBuyThreshold">--</span></div>
+                <div class="col-lg-4 mb-2"><b>动态单笔仓位：</b><span id="marketPositionPct">--</span></div>
+                <div class="col-lg-4 mb-2"><b>最低现金保留：</b><span id="marketCashReserve">--</span></div>
+                <div class="col-lg-8 mb-2"><b>状态说明：</b><span id="marketReason">--</span></div>
+                <div class="col-lg-12 small-muted" id="marketMetrics">--</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card section-card mb-4">
+        <div class="card-header bg-white"><i class="fas fa-heart-pulse"></i> 健康看板</div>
+        <div class="card-body">
+            <div class="row mb-2">
+                <div class="col-lg-3 mb-2"><b>总体状态：</b><span id="healthOverall">--</span></div>
+                <div class="col-lg-3 mb-2"><b>待成交笔数：</b><span id="healthPending">--</span></div>
+                <div class="col-lg-3 mb-2"><b>日志总量：</b><span id="healthLogTotal">--</span></div>
+                <div class="col-lg-3 mb-2"><b>待归档日志：</b><span id="healthLogArchive">--</span></div>
+            </div>
+            <div id="healthAlerts" class="small-muted">--</div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-lg-8 mb-3">
+            <div class="card section-card">
+                <div class="card-header bg-white"><i class="fas fa-chart-line"></i> 净值曲线（近90天）</div>
+                <div class="card-body"><div id="pnlChart" style="height: 320px;"></div></div>
+            </div>
+        </div>
+        <div class="col-lg-4 mb-3">
+            <div class="card section-card">
+                <div class="card-header bg-white"><i class="fas fa-vials"></i> 验证指标</div>
+                <div class="card-body">
+                    <div class="mb-2">5日预测准确率：<b id="mAcc5">--</b></div>
+                    <div class="mb-2">推荐胜率：<b id="mWin">--</b></div>
+                    <div class="mb-2">平均单笔收益：<b id="mAvg">--</b></div>
+                    <div class="mb-2">最大回撤：<b id="mDd">--</b></div>
+                    <div class="mb-2">夏普比率：<b id="mSharpe">--</b></div>
+                    <hr>
+                    <div class="mb-2">AI采纳率：<b id="mAdoption">--</b></div>
+                    <div class="mb-2">决策一致率：<b id="mAlign">--</b></div>
+                    <div class="mb-2">坏信号率：<b id="mBadSignal">--</b></div>
+                    <div class="small-muted mt-2" id="mGenerated">--</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-lg-4 mb-3">
+            <div class="card section-card h-100">
+                <div class="card-header bg-white"><i class="fas fa-triangle-exclamation"></i> 失败交易归因</div>
+                <div class="card-body">
+                    <div class="mb-2">亏损笔数：<b id="lossTradeCount">--</b></div>
+                    <div class="mb-2">累计亏损：<b id="lossTradeAmount">--</b></div>
+                    <div id="lossCategorySummary" class="small-muted">--</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-4 mb-3">
+            <div class="card section-card h-100">
+                <div class="card-header bg-white"><i class="fas fa-rotate-left"></i> 重训建议</div>
+                <div class="card-body">
+                    <div id="retrainingSuggestions" class="small-muted">--</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-4 mb-3">
+            <div class="card section-card h-100">
+                <div class="card-header bg-white"><i class="fas fa-clipboard-check"></i> 复盘任务</div>
+                <div class="card-body">
+                    <div id="reviewTasks" class="small-muted">--</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card section-card mb-4">
+        <div class="card-header bg-white"><i class="fas fa-briefcase"></i> 当前持仓</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm table-hover align-middle">
+                <thead><tr><th>代码</th><th>名称</th><th>类型</th><th>数量</th><th>成本价</th><th>现价</th><th>市值</th><th>浮盈(%)</th><th>持仓天数</th></tr></thead>
+                <tbody id="positionsBody"><tr><td colspan="9" class="text-center text-muted">加载中...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card section-card">
+        <div class="card-header bg-white"><i class="fas fa-list"></i> 最近成交流水（50条）</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm table-hover align-middle">
+                <thead><tr><th>成交日</th><th>代码</th><th>类型</th><th>动作</th><th>数量</th><th>价格</th><th>金额</th><th>触发原因</th><th>PnL(%)</th></tr></thead>
+                <tbody id="tradesBody"><tr><td colspan="9" class="text-center text-muted">加载中...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card section-card mt-4">
+        <div class="card-header bg-white"><i class="fas fa-brain"></i> 交易员思考日志（最近50条）</div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm table-hover align-middle">
+                <thead><tr><th>信号日</th><th>代码</th><th>类型</th><th>决策</th><th>决策分</th><th>AI建议</th><th>最终动作</th><th>理由</th></tr></thead>
+                <tbody id="thinkingBody"><tr><td colspan="8" class="text-center text-muted">加载中...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+let pnlChart = null;
+let adminApiKey = '';
+
+function loadAdminKey() {
+    adminApiKey = localStorage.getItem('simulated_trader_admin_key') || '';
+    const input = document.getElementById('adminKeyInput');
+    if (input) input.value = adminApiKey;
+}
+
+function saveAdminKey() {
+    const input = document.getElementById('adminKeyInput');
+    adminApiKey = (input?.value || '').trim();
+    localStorage.setItem('simulated_trader_admin_key', adminApiKey);
+    alert(adminApiKey ? '管理员密钥已保存到本地浏览器存储' : '已清空管理员密钥');
+}
+
+function fmtMoney(v) {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
+    return '¥' + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+}
+
+function fmtPct(v) {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
+    return Number(v).toFixed(2) + '%';
+}
+
+function fmtNum(v, d = 2) {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
+    return Number(v).toFixed(d);
+}
+
+function colorByValue(v) {
+    if (v === null || v === undefined || Number.isNaN(Number(v))) return '#212529';
+    return Number(v) >= 0 ? '#198754' : '#dc3545';
+}
+
+async function fetchJson(url, options = {}) {
+    const headers = Object.assign({}, options.headers || {});
+    const keyFromInput = (document.getElementById('adminKeyInput')?.value || '').trim();
+    const key = keyFromInput || adminApiKey;
+    if (key) {
+        headers['X-Admin-Key'] = key;
+    }
+    const resp = await fetch(url, Object.assign({}, options, { headers }));
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' @ ' + url);
+    return await resp.json();
+}
+
+function renderKpis(status) {
+    const s = status?.data?.summary || {};
+    const cfg = status?.data?.config || {};
+    const market = status?.data?.market_context || {};
+    document.getElementById('kpiTotal').textContent = fmtMoney(s.total_value);
+    document.getElementById('kpiCash').textContent = fmtMoney(s.cash);
+    document.getElementById('kpiPos').textContent = fmtMoney(s.positions_value);
+    document.getElementById('kpiRet').textContent = fmtPct(s.total_return_pct);
+    document.getElementById('kpiRet').style.color = colorByValue(s.total_return_pct);
+    document.getElementById('kpiPosCount').textContent = '持仓品种: ' + (s.position_count ?? '--');
+    document.getElementById('kpiDate').textContent = '交易员: ' + (cfg.trader_id || '--');
+
+    document.getElementById('marketState').textContent = market?.market?.state || '--';
+    document.getElementById('marketBuyThreshold').textContent = fmtNum((market.buy_threshold || 0) * 100, 2) + '%';
+    document.getElementById('marketPositionPct').textContent = fmtNum((market.max_single_position_pct || 0) * 100, 2) + '%';
+    document.getElementById('marketCashReserve').textContent = fmtNum((market.min_cash_reserve_pct || 0) * 100, 2) + '%';
+    document.getElementById('marketReason').textContent = market?.market?.reason || '--';
+    document.getElementById('marketMetrics').textContent = market?.market
+        ? `基准=${market.market.benchmark_code || '--'} · 5日=${fmtPct(market.market.return_5d_pct)} · 20日=${fmtPct(market.market.return_20d_pct)} · 波动=${fmtPct(market.market.volatility_pct)}`
+        : '--';
+}
+
+function renderPositions(status) {
+    const body = document.getElementById('positionsBody');
+    const rows = status?.data?.positions || [];
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无持仓</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(r => {
+        const pnl = (r.unrealized_pnl_pct ?? null);
+        return `<tr>
+            <td>${r.code || ''}</td>
+            <td>${r.name || ''}</td>
+            <td>${r.asset_type || ''}</td>
+            <td>${fmtNum(r.shares, 4)}</td>
+            <td>${fmtNum(r.cost_price, 4)}</td>
+            <td>${fmtNum(r.current_price, 4)}</td>
+            <td>${fmtMoney(r.market_value)}</td>
+            <td style="color:${colorByValue(pnl)}">${fmtPct(pnl)}</td>
+            <td>${r.hold_days ?? '--'}</td>
+        </tr>`;
+    }).join('');
+}
+
+function renderTrades(tradesResp) {
+    const body = document.getElementById('tradesBody');
+    const rows = tradesResp?.data?.trades || [];
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无成交流水</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(t => {
+        const pnl = t.pnl_pct ?? null;
+        return `<tr>
+            <td>${t.trade_date || ''}</td>
+            <td>${t.code || ''}</td>
+            <td>${t.asset_type || ''}</td>
+            <td>${t.action || ''}</td>
+            <td>${fmtNum(t.shares, 4)}</td>
+            <td>${fmtNum(t.price, 4)}</td>
+            <td>${fmtMoney(t.amount)}</td>
+            <td>${t.trigger || ''}</td>
+            <td style="color:${colorByValue(pnl)}">${fmtPct(pnl)}</td>
+        </tr>`;
+    }).join('');
+}
+
+function renderValidation(v) {
+    const data = v?.data || {};
+    const p5 = data?.prediction_accuracy?.['5d']?.accuracy_pct;
+    const win = data?.recommendation_effectiveness?.win_rate_pct;
+    const avg = data?.recommendation_effectiveness?.avg_return_pct;
+    const dd = data?.portfolio_metrics?.max_drawdown_pct;
+    const sharpe = data?.portfolio_metrics?.sharpe_ratio;
+
+    document.getElementById('mAcc5').textContent = fmtPct(p5);
+    document.getElementById('mWin').textContent = fmtPct(win);
+    document.getElementById('mAvg').textContent = fmtPct(avg);
+    document.getElementById('mDd').textContent = fmtPct(dd);
+    document.getElementById('mSharpe').textContent = sharpe === null || sharpe === undefined ? '--' : String(sharpe);
+    document.getElementById('mGenerated').textContent = '报告日期: ' + (data.generated_at || '--');
+
+    const lossAnalysis = data?.loss_trade_analysis || {};
+    document.getElementById('lossTradeCount').textContent = lossAnalysis.total_loss_trades ?? '--';
+    document.getElementById('lossTradeAmount').textContent = fmtMoney(lossAnalysis.total_loss_amount);
+
+    const categorySummary = lossAnalysis.category_summary || [];
+    document.getElementById('lossCategorySummary').innerHTML = categorySummary.length
+        ? categorySummary.map(item => `<div class="mb-1">${item.label}: <b>${item.count}</b> 笔 / ${fmtPct(item.ratio_pct)}</div>`).join('')
+        : '暂无亏损样本';
+
+    const retraining = data?.retraining_suggestions || [];
+    document.getElementById('retrainingSuggestions').innerHTML = retraining.length
+        ? retraining.slice(0, 4).map(item => `<div class="mb-2"><b>[${item.priority}] ${item.category_label}</b><br>${item.asset_type || '--'} · 亏损${fmtMoney(item.loss_amount)} · ${item.action}</div>`).join('')
+        : '暂无重训建议';
+
+    const tasks = data?.review_tasks || [];
+    document.getElementById('reviewTasks').innerHTML = tasks.length
+        ? tasks.slice(0, 4).map(item => `<div class="mb-2"><b>#${item.rank} ${item.code}</b><br>${item.category_label} · ${fmtMoney(item.loss_amount)} · ${item.task_focus}</div>`).join('')
+        : '暂无复盘任务';
+}
+
+function renderScorecard(s) {
+    const d = s?.data || {};
+    document.getElementById('mAdoption').textContent = fmtPct(d.adoption_rate_pct);
+    document.getElementById('mAlign').textContent = fmtPct(d.alignment_rate_pct);
+    document.getElementById('mBadSignal').textContent = fmtPct(d.bad_signal_rate_pct);
+}
+
+function renderThinking(t) {
+    const body = document.getElementById('thinkingBody');
+    const rows = t?.data?.logs || [];
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无思考日志</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(r => `
+        <tr>
+            <td>${r.signal_date || ''}</td>
+            <td>${r.code || ''}</td>
+            <td>${r.asset_type || ''}</td>
+            <td>${r.decision_type || ''}</td>
+            <td>${fmtNum((r.decision_score || 0) * 100, 2)}%</td>
+            <td>${r.recommended_action || ''}</td>
+            <td>${r.final_action || ''}</td>
+            <td style="max-width: 560px; white-space: normal;">${r.reasons_text || ''}</td>
+        </tr>
+    `).join('');
+}
+
+function renderHealth(h) {
+    const data = h?.data || {};
+    const metrics = data.metrics || {};
+    const status = (data.overall_status || '--').toLowerCase();
+    let cssClass = 'health-warning';
+    if (status === 'healthy') cssClass = 'health-healthy';
+    if (status === 'critical') cssClass = 'health-critical';
+    document.getElementById('healthOverall').innerHTML = `<span class="health-pill ${cssClass}">${status}</span>`;
+    document.getElementById('healthPending').textContent = metrics.pending_trade_count ?? '--';
+    document.getElementById('healthLogTotal').textContent = metrics.decision_log_total ?? '--';
+    document.getElementById('healthLogArchive').textContent = metrics.decision_log_deletable ?? '--';
+
+    const alerts = data.alerts || [];
+    document.getElementById('healthAlerts').innerHTML = alerts.length
+        ? alerts.map(item => `<div class="mb-1">[${item.level}] ${item.message}</div>`).join('')
+        : '当前无告警';
+}
+
+function renderPnlChart(pnlResp) {
+    const rows = pnlResp?.data || [];
+    const dates = rows.map(r => r.date);
+    const vals = rows.map(r => r.total_value);
+
+    if (!pnlChart) {
+        pnlChart = echarts.init(document.getElementById('pnlChart'));
+    }
+    pnlChart.setOption({
+        tooltip: { trigger: 'axis' },
+        xAxis: { type: 'category', data: dates },
+        yAxis: { type: 'value', scale: true },
+        series: [{ type: 'line', data: vals, smooth: true, areaStyle: {} }],
+        grid: { left: 40, right: 20, top: 20, bottom: 30 }
+    });
+}
+
+async function runHealthCheck() {
+    try {
+        const health = await fetchJson('/api/simulated-trader/health');
+        renderHealth(health);
+        alert('健康检查已完成，当前状态: ' + (health?.data?.overall_status || '--'));
+    } catch (err) {
+        console.error(err);
+        alert('健康检查失败: ' + err.message);
+    }
+}
+
+async function runArchiveLogs(dryRun) {
+    const confirmed = dryRun || confirm('将执行真实归档操作，是否继续？');
+    if (!confirmed) return;
+    try {
+        const payload = await fetchJson('/api/simulated-trader/archive-logs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dry_run: dryRun }),
+        });
+        const data = payload?.data || {};
+        alert((dryRun ? '归档演练完成' : '归档完成') + `，可归档=${data.deletable_logs || 0}，已归档=${data.archived_logs || 0}`);
+        await refreshAll();
+    } catch (err) {
+        console.error(err);
+        alert('日志归档失败: ' + err.message);
+    }
+}
+
+async function refreshAll() {
+    try {
+        const [status, pnl, trades, validation, thinking, scorecard, health] = await Promise.all([
+            fetchJson('/api/simulated-trader/status'),
+            fetchJson('/api/simulated-trader/pnl?days=90'),
+            fetchJson('/api/simulated-trader/trades?page=1&page_size=50'),
+            fetchJson('/api/simulated-trader/validation'),
+            fetchJson('/api/simulated-trader/thinking?page=1&page_size=50'),
+            fetchJson('/api/simulated-trader/scorecard'),
+            fetchJson('/api/simulated-trader/health'),
+        ]);
+        renderKpis(status);
+        renderHealth(health);
+        renderPositions(status);
+        renderTrades(trades);
+        renderValidation(validation);
+        renderThinking(thinking);
+        renderScorecard(scorecard);
+        renderPnlChart(pnl);
+    } catch (err) {
+        console.error(err);
+        alert('加载模拟交易员数据失败: ' + err.message);
+    }
+}
+
+window.addEventListener('resize', () => { if (pnlChart) pnlChart.resize(); });
+document.addEventListener('DOMContentLoaded', () => {
+    loadAdminKey();
+    refreshAll();
+});
+</script>
+{% endblock %}

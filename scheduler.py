@@ -156,6 +156,8 @@ CONTINUOUS_LEARNING_PROGRESS_FILE = Path(MODELS_DIR) / 'continuous_learning_prog
 LEARNING_STATUS_FILE = Path(DATA_DIR) / 'cache' / 'learning_loop_status.json'
 _continuous_learning_lock = threading.Lock()
 _continuous_learning_running = False
+_trader_sync_lock = threading.Lock()
+_trader_sync_running = False
 
 
 def _parse_hhmm(value: str, default: str) -> tuple[int, int]:
@@ -1667,6 +1669,231 @@ def rebuild_today_recommendations() -> Dict[str, Any]:
         }
 
 
+def rebuild_recommendations_for_date(for_date, session=None, skip_if_exists: bool = True) -> dict:
+    """为指定历史日期重建推荐记录（基于截止该日期的预测数据）。
+
+    专用于历史回放模式（backfill regen_recommendations=True），利用数据库中已有的
+    历史预测（Prediction 表）在不调用实时行情 API 的情况下补齐历史推荐缺口。
+
+    若目标日期早于预测数据覆盖范围（如 2025-11 没有预测），则自动降级使用
+    数据库中最新可用预测作为"代理信号"，优先选择有明确方向的预测（up_prob != 50%），
+    标记 source=proxy。
+
+    返回 dict:
+      {'skipped': bool, 'date': str, 'inserted': int}
+    """
+    from models import get_session as _get_session, Recommendation, Prediction
+
+    own_session = session is None
+    if own_session:
+        session = _get_session()
+
+    try:
+        # 1. 如设定跳过已有推荐的日期，则先检查
+        if skip_if_exists:
+            existing_count = session.query(Recommendation).filter(Recommendation.date == for_date).count()
+            if existing_count > 0:
+                logger.debug(f"[RegenRec] {for_date} 已有 {existing_count} 条推荐，跳过")
+                return {'skipped': True, 'date': str(for_date), 'existing_count': existing_count}
+
+        rec_types = ['a_stock', 'etf', 'active_fund', 'gold', 'silver']
+        LIMIT_PER_TYPE = 20
+        all_records: list[dict] = []
+
+        for rec_type in rec_types:
+            # 优先取截止 for_date 最近的预测日期；若无则使用最新可用预测（代理模式）
+            latest_row = (
+                session.query(Prediction.date)
+                .filter(
+                    Prediction.asset_type == rec_type,
+                    Prediction.date <= for_date,
+                    Prediction.period_days == 5,
+                )
+                .order_by(Prediction.date.desc())
+                .first()
+            )
+            proxy_mode = False
+            if not latest_row:
+                # 没有截止该日期的预测，降级到代理模式
+                # 优先查找最新有明确方向的预测（up_prob 偏离 50%），其次用最新预测
+                # 优先选取看涨偏向（>52%）的代理预测，避免选中熊市偏差日期
+                biased_row = (
+                    session.query(Prediction.date)
+                    .filter(
+                        Prediction.asset_type == rec_type,
+                        Prediction.period_days == 5,
+                        Prediction.up_probability > 52.0,
+                    )
+                    .order_by(Prediction.up_probability.desc(), Prediction.date.desc())
+                    .first()
+                )
+                if not biased_row:
+                    # 看涨预测不存在时，退而求其次取任意有方向的预测
+                    biased_row = (
+                        session.query(Prediction.date)
+                        .filter(
+                            Prediction.asset_type == rec_type,
+                            Prediction.period_days == 5,
+                        )
+                        .filter(
+                            (Prediction.up_probability < 48.0) | (Prediction.up_probability > 52.0)
+                        )
+                        .order_by(Prediction.date.desc(), Prediction.up_probability.desc())
+                        .first()
+                    )
+                if biased_row:
+                    latest_row = biased_row
+                else:
+                    # 若没有有方向的预测，用最新的
+                    fallback_row = (
+                        session.query(Prediction.date)
+                        .filter(
+                            Prediction.asset_type == rec_type,
+                            Prediction.period_days == 5,
+                        )
+                        .order_by(Prediction.date.desc())
+                        .first()
+                    )
+                    if not fallback_row:
+                        continue
+                    latest_row = fallback_row
+                proxy_mode = True
+
+            latest_pred_date = latest_row[0]
+
+            # 取该日期 5 日预测，按上涨概率降序
+            preds_5d = (
+                session.query(Prediction)
+                .filter(
+                    Prediction.asset_type == rec_type,
+                    Prediction.date == latest_pred_date,
+                    Prediction.period_days == 5,
+                )
+                .order_by(Prediction.up_probability.desc())
+                .limit(LIMIT_PER_TYPE * 5)
+                .all()
+            )
+
+            seen_codes: set[str] = set()
+            for pred in preds_5d:
+                if pred.code in seen_codes or len(seen_codes) >= LIMIT_PER_TYPE:
+                    break
+                # 在非代理模式下过滤中性预测，代理模式保留所有
+                if not proxy_mode and abs(float(pred.up_probability or 50.0) - 50.0) < 0.05:
+                    continue
+                seen_codes.add(pred.code)
+
+                pred_20d = (
+                    session.query(Prediction)
+                    .filter(
+                        Prediction.code == pred.code,
+                        Prediction.asset_type == rec_type,
+                        Prediction.date == latest_pred_date,
+                        Prediction.period_days == 20,
+                    )
+                    .first()
+                )
+                pred_60d = (
+                    session.query(Prediction)
+                    .filter(
+                        Prediction.code == pred.code,
+                        Prediction.asset_type == rec_type,
+                        Prediction.date == latest_pred_date,
+                        Prediction.period_days == 60,
+                    )
+                    .first()
+                )
+
+                up5 = float(pred.up_probability or 50.0)
+                up20 = float(pred_20d.up_probability) if pred_20d else 50.0
+                up60 = float(pred_60d.up_probability) if pred_60d else 50.0
+                conf = float(pred.confidence or 50.0)
+
+                # 代理模式下，ETF/基金/贵金属 ML 模型普遍输出空头偏差（约40%），
+                # 直接使用会导致这些资产在历史回放中永远无法买入。
+                # 为代理信号设置中性偏多基准，反映"无历史数据=不确定"而非"看跌"。
+                # 62%（略高于60%）给 gold/silver 留出边际，避免其因分配权重小而恰好未过阈值。
+                _NON_STOCK_PROXY_BASELINE = 62.0
+                if proxy_mode and rec_type not in ('a_stock', 'hk_stock', 'us_stock'):
+                    up5 = max(up5, _NON_STOCK_PROXY_BASELINE)
+                    up20 = max(up20, _NON_STOCK_PROXY_BASELINE)
+                    up60 = max(up60, _NON_STOCK_PROXY_BASELINE)
+
+                # total_score 映射降温：50%→2.0, 60%→3.0, 70%→4.0, 80%→5.0
+                # 对代理模式额外打折，避免历史缺数时分数系统性偏乐观。
+                score = 2.0 + (up5 - 50.0) / 10.0
+                if proxy_mode:
+                    score -= 0.35
+                if 48.0 <= up5 <= 52.0:
+                    score -= 0.25
+                score = max(1.0, min(5.0, score))
+
+                vol = 'low' if conf >= 70 else ('medium' if conf >= 50 else 'high')
+                source_tag = f'代理({latest_pred_date})' if proxy_mode else str(latest_pred_date)
+
+                all_records.append({
+                    'rec_type': rec_type,
+                    'code': pred.code,
+                    'name': pred.name or pred.code,
+                    'total_score': round(score, 4),
+                    'up5': up5,
+                    'up20': up20,
+                    'up60': up60,
+                    'volatility_level': vol,
+                    'reason_summary': (
+                        f'历史回放 | 预测源={source_tag} | '
+                        f'5日上涨概率={up5:.1f}%'
+                    ),
+                })
+
+        if not all_records:
+            logger.debug(f"[RegenRec] {for_date} 无可用预测数据，跳过")
+            return {'skipped': True, 'date': str(for_date), 'reason': 'no_predictions'}
+
+        # 2. 删除该日期旧推荐（skip_if_exists=False 时强制重建）
+        if not skip_if_exists:
+            session.query(Recommendation).filter(Recommendation.date == for_date).delete()
+
+        # 3. 写入数据库
+        total_count = 0
+        for rec_type in rec_types:
+            type_recs = sorted(
+                [r for r in all_records if r['rec_type'] == rec_type],
+                key=lambda x: x['total_score'],
+                reverse=True,
+            )
+            for i, rec in enumerate(type_recs):
+                db_rec = Recommendation(
+                    date=for_date,
+                    code=rec['code'],
+                    name=rec['name'],
+                    type=rec['rec_type'],
+                    rank=i + 1,
+                    total_score=rec['total_score'],
+                    current_price=0.0,
+                    up_probability_5d=rec['up5'],
+                    up_probability_20d=rec['up20'],
+                    up_probability_60d=rec['up60'],
+                    volatility_level=rec['volatility_level'],
+                    reason_summary=rec['reason_summary'],
+                )
+                session.add(db_rec)
+                total_count += 1
+
+        session.commit()
+        logger.info(f"[RegenRec] {for_date} 历史推荐重建完成，共 {total_count} 条")
+        return {'skipped': False, 'date': str(for_date), 'inserted': total_count}
+
+    except Exception as exc:
+        if own_session:
+            session.rollback()
+        logger.error(f"[RegenRec] {for_date} 历史推荐重建失败: {exc}", exc_info=True)
+        raise
+    finally:
+        if own_session:
+            session.close()
+
+
 def generate_daily_recommendations():
     """每日生成投资推荐（收盘后生成，默认用于下个交易日）"""
     result = rebuild_today_recommendations()
@@ -2578,6 +2805,163 @@ def ensure_data_inventory_current(force: bool = False):
         return False
 
 
+def _run_trader_daily_safe():
+    """模拟交易员每日信号处理（安全包装，不阻塞调度器）"""
+    try:
+        from trader.engine import run_trader_daily
+        run_trader_daily()
+    except Exception as e:
+        logger.error(f"模拟交易员信号处理失败: {e}", exc_info=True)
+
+
+def _settle_trader_trades_safe():
+    """模拟交易员成交结算（安全包装，不阻塞调度器）"""
+    try:
+        from trader.engine import settle_trader_trades
+        settle_trader_trades()
+    except Exception as e:
+        logger.error(f"模拟交易员成交结算失败: {e}", exc_info=True)
+
+
+def ensure_trader_simulation_current(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """补偿推进模拟交易员到最新交易日，避免服务中断导致净值曲线停滞。"""
+    global _trader_sync_running
+
+    if not _trader_sync_lock.acquire(blocking=False):
+        return {
+            'triggered': False,
+            'reason': 'already_running',
+            'processed_days': 0,
+        }
+
+    _trader_sync_running = True
+    try:
+        from trader.engine import SimulatedTrader, DEFAULT_TRADER_ID
+        from models import get_session, SimulatedDailyPnl, Recommendation
+
+        target_date = (now or datetime.now()).date()
+        session = get_session()
+        try:
+            latest_signal_date = session.query(Recommendation.date).filter(
+                Recommendation.date <= target_date
+            ).order_by(Recommendation.date.desc()).scalar()
+            if latest_signal_date is None:
+                logger.info("模拟交易员补偿检查: 无可用推荐日期，跳过")
+                return {
+                    'triggered': False,
+                    'reason': 'no_recommendation_data',
+                    'processed_days': 0,
+                }
+
+            last_pnl_date = session.query(SimulatedDailyPnl.pnl_date).filter(
+                SimulatedDailyPnl.trader_id == DEFAULT_TRADER_ID
+            ).order_by(SimulatedDailyPnl.pnl_date.desc()).scalar()
+
+            if last_pnl_date is None:
+                bootstrap_days = max(30, int(os.environ.get('TRADER_SYNC_BOOTSTRAP_DAYS', '90')))
+                fallback_start = target_date - timedelta(days=bootstrap_days - 1)
+                earliest_signal_date = session.query(Recommendation.date).order_by(Recommendation.date.asc()).scalar()
+                start_date = max(fallback_start, earliest_signal_date)
+                logger.info(
+                    f"模拟交易员补偿检查: 无历史净值，使用冷启动窗口 {start_date} ~ {target_date}"
+                )
+            else:
+                if last_pnl_date >= target_date:
+                    return {
+                        'triggered': False,
+                        'reason': 'already_current',
+                        'processed_days': 0,
+                        'last_pnl_date': str(last_pnl_date),
+                    }
+                start_date = last_pnl_date + timedelta(days=1)
+        finally:
+            session.close()
+
+        trader = SimulatedTrader()
+        cur = start_date
+        processed_days = 0
+        while cur <= target_date:
+            trader.settle_pending_trades(cur)
+            trader.run_daily(cur)
+            cur += timedelta(days=1)
+            processed_days += 1
+        trader.settle_pending_trades(target_date + timedelta(days=1))
+
+        logger.info(
+            f"模拟交易员补偿完成: {start_date} -> {target_date}, processed_days={processed_days}"
+        )
+        return {
+            'triggered': True,
+            'reason': 'catchup_completed',
+            'processed_days': processed_days,
+            'start_date': str(start_date),
+            'end_date': str(target_date),
+        }
+    except Exception as e:
+        logger.error(f"模拟交易员补偿失败: {e}", exc_info=True)
+        return {
+            'triggered': False,
+            'reason': f'failed: {e}',
+            'processed_days': 0,
+        }
+    finally:
+        _trader_sync_running = False
+        _trader_sync_lock.release()
+
+
+def _ensure_trader_simulation_current_safe():
+    """模拟交易员补偿任务安全包装。"""
+    try:
+        result = ensure_trader_simulation_current()
+        if result.get('triggered'):
+            logger.info(
+                f"模拟交易员补偿任务完成: {result.get('start_date')} -> {result.get('end_date')} "
+                f"(processed_days={result.get('processed_days')})"
+            )
+    except Exception as e:
+        logger.error(f"模拟交易员补偿任务失败: {e}", exc_info=True)
+
+
+def _archive_trader_logs_safe():
+    """模拟交易员思考日志归档（安全包装，不阻塞调度器）"""
+    try:
+        from trader.maintenance import archive_old_decision_logs
+        result = archive_old_decision_logs()
+        logger.info(
+            f"模拟交易员日志归档完成: archived={result['archived_logs']} remaining={result['remaining_logs']} retention_days={result['retention_days']}"
+        )
+    except Exception as e:
+        logger.error(f"模拟交易员日志归档失败: {e}", exc_info=True)
+
+
+def _run_adaptive_threshold_tuning_safe():
+    """基于5日预测复盘错误率，自动调整 decision_threshold（安全包装）"""
+    try:
+        from reviews.reflection import ReflectionLearner
+        from trader.profile_config import apply_threshold_adjustment, get_active_profile
+
+        learner = ReflectionLearner()
+        suggestion = learner.suggest_threshold_adjustment(days=30, min_samples=10)
+        learner.close()
+
+        if suggestion['action'] == 'hold' or suggestion['delta'] == 0.0:
+            logger.info(f"[自适应调参] 无需调整: {suggestion['reason']}")
+            return
+
+        result = apply_threshold_adjustment(
+            new_decision_threshold=suggestion['new_threshold'],
+            reason=suggestion['reason'],
+        )
+        new_val = result.get('decision_threshold', suggestion['new_threshold'])
+        logger.info(
+            f"[自适应调参] 已更新 decision_threshold → {new_val:.4f}  "
+            f"(5日错误率={suggestion['error_rate']:.1f}%, n={suggestion['total_5d']}, "
+            f"delta={suggestion['delta']:+.2f})"
+        )
+    except Exception as e:
+        logger.error(f"自适应阈值调参失败: {e}", exc_info=True)
+
+
 def init_scheduler():
     """初始化定时任务 - 优化版"""
     logger.info("初始化定时任务...")
@@ -2803,7 +3187,57 @@ def init_scheduler():
             )
         else:
             logger.info("已关闭持续学习优化任务（CONTINUOUS_LEARNING_ENABLED=false）")
-        
+
+        # 任务19: 模拟交易员 - 每日信号处理（收盘后，生成 T+1 待成交意向）
+        scheduler.add_job(
+            func=_run_trader_daily_safe,
+            trigger=CronTrigger(hour=18, minute=30),
+            id='simulated_trader_daily',
+            name='模拟交易员-信号处理',
+            replace_existing=True
+        )
+        logger.info("已添加任务: 模拟交易员-信号处理 (每日18:30)")
+
+        # 任务20: 模拟交易员 - T+1 成交结算（开盘后，用开盘价落实昨日意向）
+        scheduler.add_job(
+            func=_settle_trader_trades_safe,
+            trigger=CronTrigger(hour=9, minute=35),
+            id='simulated_trader_settle',
+            name='模拟交易员-成交结算',
+            replace_existing=True
+        )
+        logger.info("已添加任务: 模拟交易员-成交结算 (每日09:35)")
+
+        # 任务20.1: 模拟交易员 - 每日补偿续填（防止服务中断导致净值停在旧日期）
+        scheduler.add_job(
+            func=_ensure_trader_simulation_current_safe,
+            trigger=CronTrigger(hour=19, minute=10),
+            id='simulated_trader_catchup',
+            name='模拟交易员-补偿续填',
+            replace_existing=True
+        )
+        logger.info("已添加任务: 模拟交易员-补偿续填 (每日19:10)")
+
+        # 任务21: 模拟交易员 - 思考日志归档（每日03:05）
+        scheduler.add_job(
+            func=_archive_trader_logs_safe,
+            trigger=CronTrigger(hour=3, minute=5),
+            id='simulated_trader_archive_logs',
+            name='模拟交易员-日志归档',
+            replace_existing=True
+        )
+        logger.info("已添加任务: 模拟交易员-日志归档 (每日03:05)")
+
+        # 任务22: 自适应阈值调参（每日收盘复盘后，基于5日预测错误率微调入场门槛）
+        scheduler.add_job(
+            func=_run_adaptive_threshold_tuning_safe,
+            trigger=CronTrigger(hour=19, minute=30),
+            id='adaptive_threshold_tuning',
+            name='自适应阈值调参',
+            replace_existing=True
+        )
+        logger.info("已添加任务: 自适应阈值调参 (每日19:30)")
+
         scheduler.start()
         logger.info(f"定时任务调度器已启动，共 {len(scheduler.get_jobs())} 个任务")
 
@@ -2811,6 +3245,16 @@ def init_scheduler():
             ensure_daily_predictions_current()
         except Exception as e:
             logger.warning(f"启动后预测补偿执行失败: {e}")
+
+        auto_trader_sync_on_startup = os.environ.get('AUTO_TRADER_SYNC_ON_STARTUP', 'true').lower() == 'true'
+        if auto_trader_sync_on_startup:
+            try:
+                threading.Thread(target=_ensure_trader_simulation_current_safe, daemon=True).start()
+                logger.info("已触发启动后模拟交易员补偿续填")
+            except Exception as e:
+                logger.warning(f"启动后模拟交易员补偿触发失败: {e}")
+        else:
+            logger.info("已跳过启动后模拟交易员补偿（AUTO_TRADER_SYNC_ON_STARTUP=false）")
 
         auto_missing_backfill_on_startup = os.environ.get('AUTO_MISSING_BACKFILL_ON_STARTUP', 'false').lower() == 'true'
         if auto_missing_backfill_on_startup:

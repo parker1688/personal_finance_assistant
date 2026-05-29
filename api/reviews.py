@@ -13,7 +13,7 @@ from flask import jsonify, request
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import get_session, Review, Prediction, AccuracyStat, ModelVersion, RawFundData, DailyPrice, Holding
+from models import get_session, Review, Prediction, AccuracyStat, ModelVersion, RawFundData, DailyPrice, Holding, SimulatedTrade
 from predictors.model_manager import ModelManager
 from config import MIN_MODEL_ACCURACY, MIN_MODEL_F1_SCORE, MIN_SHORT_HORIZON_AUC, MAX_SHORT_HORIZON_BRIER
 from utils import get_logger, get_today
@@ -400,6 +400,53 @@ def _load_validated_review_predictions(session, today, holding_keys, lookback_da
     ])
     holding_preds = [p for p in validated_preds if _is_current_holding_prediction(p, holding_keys)]
     return validated_preds, holding_preds
+
+
+def _load_recent_trade_reviews(session, limit=20):
+    """从模拟交易员已平仓卖出构建即时复盘记录。"""
+    sells = session.query(SimulatedTrade).filter(
+        SimulatedTrade.action == 'sell',
+        SimulatedTrade.price > 0,
+    ).order_by(
+        SimulatedTrade.trade_date.desc(),
+        SimulatedTrade.id.desc(),
+    ).limit(max(20, int(limit) * 3)).all()
+
+    rows = []
+    for sell in sells:
+        buy = session.query(SimulatedTrade).filter(
+            SimulatedTrade.trader_id == sell.trader_id,
+            SimulatedTrade.code == sell.code,
+            SimulatedTrade.action == 'buy',
+            SimulatedTrade.price > 0,
+            SimulatedTrade.trade_date <= sell.trade_date,
+        ).order_by(SimulatedTrade.trade_date.desc(), SimulatedTrade.id.desc()).first()
+
+        hold_days = None
+        if buy and buy.trade_date and sell.trade_date:
+            hold_days = max(1, int((sell.trade_date - buy.trade_date).days))
+
+        pnl = float(sell.pnl or 0.0)
+        pnl_pct = float(sell.pnl_pct or 0.0)
+        is_correct = pnl >= 0
+        rows.append({
+            'id': f'trade-{sell.id}',
+            'code': sell.code,
+            'name': sell.name or sell.code,
+            'period_days': hold_days or 1,
+            'predicted_up_prob': float((buy.signal_score if buy and buy.signal_score is not None else 60.0)),
+            'predicted_direction': 'up',
+            'actual_direction': 'up' if is_correct else 'down',
+            'actual_return': pnl_pct,
+            'is_direction_correct': is_correct,
+            'is_target_correct': None,
+            'error_analysis': f"即时成交复盘: 触发={sell.trigger or 'signal'}，PnL={pnl:+.2f}元({pnl_pct:+.2f}%)",
+            'status': 'trade_reviewed',
+            'reviewed_at': sell.trade_date.strftime('%Y-%m-%d') if sell.trade_date else '',
+            'expiry_date': sell.trade_date.strftime('%Y-%m-%d') if sell.trade_date else '',
+        })
+
+    return rows[:limit]
 
 
 def _choose_review_sample_scope(all_preds, holding_preds):
@@ -856,6 +903,10 @@ def register_reviews_routes(app):
                     'expiry_date': pred.expiry_date.strftime('%Y-%m-%d') if pred and pred.expiry_date else '',
                 })
 
+            # 追加“成交即复盘”记录：平仓后立即出现在 /reviews
+            if len(reviews_list) < limit:
+                reviews_list.extend(_load_recent_trade_reviews(session, limit=max(5, limit - len(reviews_list))))
+
             if len(reviews_list) < limit:
                 pending_preds = session.query(Prediction).filter(
                     Prediction.is_direction_correct.is_(None)
@@ -923,6 +974,13 @@ def register_reviews_routes(app):
 
             def _recent_sort_key(item):
                 status = str(item.get('status') or '')
+                if status == 'trade_reviewed':
+                    reviewed_dt = _parse_dt(item.get('reviewed_at') or '')
+                    if reviewed_dt == datetime.min:
+                        reviewed_dt = _parse_dt(item.get('expiry_date') or '')
+                    # 即时成交复盘优先展示，按成交时间倒序
+                    return (0, 0, -reviewed_dt.timestamp() if reviewed_dt != datetime.min else float('inf'))
+
                 if status == 'pending':
                     days_to_expiry = item.get('days_to_expiry')
                     if days_to_expiry is None:
@@ -932,14 +990,14 @@ def register_reviews_routes(app):
                         else:
                             days_to_expiry = 10**9
                     created_dt = _parse_dt(item.get('reviewed_at') or '')
-                    # pending 优先；到期更近优先（已过期值更小会排在最前）；同日按创建时间倒序
-                    return (0, int(days_to_expiry), -created_dt.timestamp() if created_dt != datetime.min else float('inf'))
+                    # pending 次优先；到期更近优先（已过期值更小会排在最前）；同日按创建时间倒序
+                    return (1, int(days_to_expiry), -created_dt.timestamp() if created_dt != datetime.min else float('inf'))
 
                 reviewed_dt = _parse_dt(item.get('reviewed_at') or '')
                 if reviewed_dt == datetime.min:
                     reviewed_dt = _parse_dt(item.get('expiry_date') or '')
-                # reviewed 在 pending 之后，按复盘时间倒序
-                return (1, 0, -reviewed_dt.timestamp() if reviewed_dt != datetime.min else float('inf'))
+                # 普通reviewed放在最后，按复盘时间倒序
+                return (2, 0, -reviewed_dt.timestamp() if reviewed_dt != datetime.min else float('inf'))
 
             reviews_list = sorted(deduped_reviews, key=_recent_sort_key)[:limit]
             

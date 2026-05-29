@@ -11,6 +11,11 @@
 .pill-low { background: #e8f7ee; color: #17824c; }
 .pill-medium { background: #fff8e6; color: #9a6b00; }
 .pill-high { background: #fdecec; color: #bf2f45; }
+.action-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+.action-clear { background: #fde8ec; color: #c0392b; }
+.action-reduce { background: #fff3cd; color: #856404; }
+.action-add { background: #d1f5e0; color: #176342; }
+.action-hold { background: #e9ecef; color: #495057; }
 </style>
 {% endblock %}
 
@@ -32,11 +37,67 @@
     <!-- 未来信号仪表板 -->
     <div id="futureSignalsContainer"></div>
     
-    <div class="card mb-4"><div class="card-header"><i class="fas fa-briefcase"></i> 持仓列表</div><div class="card-body"><div class="table-responsive"><table class="table-custom"><thead><tr><th>类型</th><th>代码</th><th>名称</th><th>数量</th><th>成本价(¥)</th><th>当前价(¥)</th><th>市值(¥)</th><th>盈亏(¥)</th><th>盈亏率</th><th>操作</th></tr></thead><tbody id="holdingsList"><tr><td colspan="10" class="text-center">加载中...</td></tr></tbody></table></div></div></div>
+    <div class="card mb-4"><div class="card-header"><i class="fas fa-briefcase"></i> 持仓列表</div><div class="card-body"><div class="table-responsive"><table class="table-custom"><thead><tr><th>类型</th><th>代码</th><th>名称</th><th>数量</th><th>成本价(¥)</th><th>当前价(¥)</th><th>市值(¥)</th><th>盈亏(¥)</th><th>盈亏率</th><th>AI建议</th><th>操作</th></tr></thead><tbody id="holdingsList"><tr><td colspan="11" class="text-center">加载中...</td></tr></tbody></table></div></div></div>
+
+    <!-- 操作记录面板 -->
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="fas fa-clipboard-list"></i> 持仓操作记录</span>
+            <div>
+                <select id="actionFilterStatus" class="form-select form-select-sm d-inline-block" style="width:120px;">
+                    <option value="">全部状态</option>
+                    <option value="pending">待复盘</option>
+                    <option value="reviewed">已复盘</option>
+                </select>
+                <button class="btn btn-sm btn-outline-secondary ms-2" onclick="loadActionHistory()"><i class="fas fa-rotate"></i></button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table-custom">
+                    <thead><tr><th>操作时间</th><th>代码/名称</th><th>AI建议</th><th>实际操作</th><th>数量变化</th><th>参考价</th><th>备注</th><th>复盘状态</th><th>复盘</th></tr></thead>
+                    <tbody id="actionHistoryList"><tr><td colspan="9" class="text-center text-muted">加载中...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
     
     <div class="row"><div class="col-md-6"><div class="card"><div class="card-header"><i class="fas fa-chart-line"></i> 持仓市值趋势</div><div class="card-body"><div id="valueTrendChart" style="height:300px;"></div></div></div></div>
     <div class="col-md-6"><div class="card"><div class="card-header"><i class="fas fa-chart-pie"></i> 资产类型分布</div><div class="card-body"><div id="assetTypeChart" style="height:300px;"></div></div></div></div></div>
 </div>
+
+<!-- 执行操作弹窗 -->
+<div class="modal fade" id="executeActionModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title">执行操作建议</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+        <div id="executeActionSummary" class="alert alert-info mb-3"></div>
+        <input type="hidden" id="execCode"><input type="hidden" id="execName"><input type="hidden" id="execAssetType">
+        <input type="hidden" id="execAiSuggestion"><input type="hidden" id="execAiReason"><input type="hidden" id="execAiLevel"><input type="hidden" id="execCurrentPrice">
+        <div class="mb-3">
+            <label class="form-label fw-bold">实际执行操作 *</label>
+            <select class="form-select" id="execActualAction">
+                <option value="加仓">加仓</option><option value="减仓">减仓</option><option value="清仓">清仓</option>
+                <option value="持有">持有（观察不动）</option><option value="跳过">跳过（不执行）</option>
+            </select>
+        </div>
+        <div class="mb-3"><label class="form-label">变更数量（加仓填正数，减仓填负数，清仓留空）</label><input type="number" class="form-control" id="execQuantity" placeholder="例如 100 或 -50，清仓可留空" step="0.01"></div>
+        <div class="mb-3"><label class="form-label">参考价格（¥）</label><input type="number" class="form-control" id="execPrice" placeholder="当前市价" step="0.0001"></div>
+        <div class="mb-3"><label class="form-label">备注</label><textarea class="form-control" id="execNotes" rows="2" placeholder="可选"></textarea></div>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-custom" id="confirmExecuteBtn">确认记录</button></div>
+</div></div></div>
+
+<!-- 复盘弹窗 -->
+<div class="modal fade" id="reviewActionModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title">操作复盘</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+        <input type="hidden" id="reviewActionId">
+        <div id="reviewActionSummary" class="alert alert-secondary mb-3 small"></div>
+        <div class="mb-3"><label class="form-label fw-bold">复盘结论 *</label><select class="form-select" id="reviewOutcome"><option value="profit">盈利（操作正确）</option><option value="neutral">持平（无明显影响）</option><option value="loss">亏损（操作有误）</option></select></div>
+        <div class="mb-3"><label class="form-label">复盘说明</label><textarea class="form-control" id="reviewNotes" rows="3" placeholder="可描述市场变化、操作得失..."></textarea></div>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-custom" id="confirmReviewBtn">保存复盘</button></div>
+</div></div></div>
 
 <div class="modal fade" id="addHoldingModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
     <div class="modal-header"><h5 class="modal-title" id="holdingModalTitle">添加持仓</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
@@ -56,6 +117,7 @@
 
 <script>
 let valueChart = null, assetChart = null, holdingLookupTimer = null, lastAutofilledHoldingName = '';
+let _cachedActionMap = {};
 const holdingAssetTypeLabelMap = { stock:'股票', fund:'基金', etf:'ETF', gold:'黄金', silver:'白银' };
 
 function formatCurrency(v) { if (v===undefined||v===null) return '--'; const s = v>=0?'+':''; return `¥${s}${v.toFixed(2)}`; }
@@ -71,6 +133,14 @@ function loadHoldings() {
                 for (const h of holdings) {
                     const profitClass = h.profit_cny >= 0 ? 'text-success' : 'text-danger';
                     const assetTypeName = { 'stock':'股票', 'fund':'基金', 'etf':'ETF', 'gold':'黄金', 'silver':'白银' }[h.asset_type] || h.asset_type;
+                                        const sig = _cachedActionMap[h.code] || {};
+                                        const aiAction = sig.action || '--';
+                                        const aiLevel = sig.level || 'low';
+                                        const aiCls = aiAction==='清仓'?'action-clear':(aiAction==='减仓'?'action-reduce':(aiAction==='增仓'?'action-add':'action-hold'));
+                                        const aiLevelCls = aiLevel==='high'?'danger':(aiLevel==='medium'?'warning':'secondary');
+                                        const aiBadge = aiAction !== '--'
+                                            ? `<span class="action-badge ${aiCls}">${escapeHtml(aiAction)}</span> <span class="badge bg-${aiLevelCls}" style="font-size:10px;">${aiLevel==='high'?'高':aiLevel==='medium'?'中':'低'}</span>`
+                                            : '<span class="text-muted small">加载中</span>';
                     html += `<tr>
                         <td><span class="badge bg-secondary">${assetTypeName}</span></td>
                         <td>${escapeHtml(h.code)}</td>
@@ -81,14 +151,19 @@ function loadHoldings() {
                         <td>¥${h.market_value_cny.toFixed(2)}</td>
                         <td class="${profitClass}">${h.profit_cny>=0?'+':''}¥${h.profit_cny.toFixed(2)}</td>
                         <td class="${profitClass}">${h.profit_rate_cny>=0?'+':''}${h.profit_rate_cny.toFixed(2)}%</td>
-                        <td><button class="btn btn-sm btn-outline-primary" onclick="editHolding(${h.id})">编辑</button> <button class="btn btn-sm btn-outline-danger" onclick="deleteHolding(${h.id})">删除</button></td>
+                        <td>${aiBadge}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-primary" onclick="editHolding(${h.id})">编辑</button>
+                            <button class="btn btn-sm btn-outline-danger" onclick="deleteHolding(${h.id})">删除</button>
+                            <button class="btn btn-sm btn-outline-success ms-1" onclick="openExecuteModal('${escapeHtml(h.code)}','${escapeHtml(h.name)}','${h.asset_type}',${h.current_price_cny})"><i class="fas fa-check-circle"></i> 执行</button>
+                        </td>
                     </tr>`;
                 }
                 $('#holdingsList').html(html);
-            } else { $('#holdingsList').html('<tr><td colspan="10" class="text-center">暂无持仓数据，请添加</td></tr>'); }
+            } else { $('#holdingsList').html('<tr><td colspan="11" class="text-center">暂无持仓数据，请添加</td></tr>'); }
             loadTrendChart(); loadAssetTypeChart(); loadFutureSignals();
         }
-    }, error: function() { $('#holdingsList').html('<tr><td colspan="10" class="text-center text-danger">加载失败</td></tr>'); } });
+    }, error: function() { $('#holdingsList').html('<tr><td colspan="11" class="text-center text-danger">加载失败</td></tr>'); } });
 }
 
 function setHoldingLookupHint(message, tone = 'muted') {
@@ -186,6 +261,21 @@ function loadFutureSignals() {
         if (r.code!==200 || !r.data) { $('#futureSignalsContainer').html(''); return; }
         const data = r.data;
         const summary = data.summary || {};
+                // 缓存 AI 操作建议
+                _cachedActionMap = {};
+                for (const act of (data.current_asset_actions || [])) { _cachedActionMap[act.code] = act; }
+                // 刷新持仓行的 AI 建议徽标
+                $('#holdingsList tr').each(function() {
+                    const codeCell = $(this).find('td:eq(1)').text().trim();
+                    if (!codeCell) return;
+                    const sig = _cachedActionMap[codeCell];
+                    if (!sig) return;
+                    const aiAction = sig.action || '--';
+                    const aiLevel = sig.level || 'low';
+                    const aiCls = aiAction==='清仓'?'action-clear':(aiAction==='减仓'?'action-reduce':(aiAction==='增仓'?'action-add':'action-hold'));
+                    const aiLevelCls = aiLevel==='high'?'danger':(aiLevel==='medium'?'warning':'secondary');
+                    $(this).find('td:eq(9)').html(`<span class="action-badge ${aiCls}">${escapeHtml(aiAction)}</span> <span class="badge bg-${aiLevelCls}" style="font-size:10px;">${aiLevel==='high'?'高':aiLevel==='medium'?'中':'低'}</span>`);
+                });
         const advice = data.portfolio_advice || {};
         let html = '';
 
@@ -346,6 +436,109 @@ $('#importBtn').on('click', function() {
     input.click();
 });
 
-$(document).ready(function() { loadHoldings(); loadFutureSignals(); $(window).resize(function() { if (valueChart) valueChart.resize(); if (assetChart) assetChart.resize(); }); });
+$(document).ready(function() { loadHoldings(); loadFutureSignals(); loadActionHistory(); $(window).resize(function() { if (valueChart) valueChart.resize(); if (assetChart) assetChart.resize(); }); });
+
+function openExecuteModal(code, name, assetType, currentPrice) {
+    const sig = _cachedActionMap[code] || {};
+    $('#execCode').val(code); $('#execName').val(name); $('#execAssetType').val(assetType);
+    $('#execAiSuggestion').val(sig.action || ''); $('#execAiReason').val(sig.suggestion || sig.message || '');
+    $('#execAiLevel').val(sig.level || ''); $('#execCurrentPrice').val(currentPrice);
+    $('#execPrice').val(currentPrice);
+    const aiAction = sig.action || '持有';
+    $('#execActualAction').val(aiAction);
+    const aiLvlText = {'high':'高风险','medium':'中风险','low':'低风险'}[sig.level] || '';
+    const actionCls = aiAction==='清仓'?'danger':(aiAction==='减仓'?'warning':(aiAction==='增仓'?'success':'secondary'));
+    $('#executeActionSummary').html(
+        `<strong>${escapeHtml(name)}</strong>（${escapeHtml(code)}）<br>` +
+        `AI建议：<span class="badge bg-${actionCls}">${escapeHtml(aiAction)}</span>` +
+        (aiLvlText ? ` <span class="badge bg-secondary">${aiLvlText}</span>` : '') +
+        (sig.suggestion ? `<br><small class="text-muted">${escapeHtml(sig.suggestion)}</small>` : '')
+    );
+    $('#executeActionModal').modal('show');
+}
+
+$('#confirmExecuteBtn').on('click', function() {
+    const payload = {
+        holding_code: $('#execCode').val(), holding_name: $('#execName').val(),
+        asset_type: $('#execAssetType').val(), ai_suggestion: $('#execAiSuggestion').val(),
+        ai_reason: $('#execAiReason').val(), ai_level: $('#execAiLevel').val(),
+        actual_action: $('#execActualAction').val(),
+        quantity_changed: $('#execQuantity').val() || null,
+        price_at_action: $('#execPrice').val() || null,
+        notes: $('#execNotes').val(),
+    };
+    $.ajax({
+        url: '/api/holdings/actions', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify(payload),
+        success: function(r) {
+            if (r.code === 200) {
+                $('#executeActionModal').modal('hide');
+                $('#execQuantity').val(''); $('#execNotes').val('');
+                showToast('操作记录已保存', 'success');
+                loadActionHistory();
+            } else { showToast('保存失败: ' + r.message, 'error'); }
+        },
+        error: function() { showToast('网络错误', 'error'); }
+    });
+});
+
+function loadActionHistory() {
+    const status = $('#actionFilterStatus').val();
+    $.ajax({
+        url: '/api/holdings/actions' + (status ? '?review_status=' + status : ''),
+        method: 'GET',
+        success: function(r) {
+            if (!(r.code === 200 && r.data)) { $('#actionHistoryList').html('<tr><td colspan="9" class="text-center text-danger">加载失败</td></tr>'); return; }
+            if (!r.data.length) { $('#actionHistoryList').html('<tr><td colspan="9" class="text-center text-muted">暂无操作记录</td></tr>'); return; }
+            const outcomeMap = { profit:'盈利', loss:'亏损', neutral:'持平' };
+            let html = '';
+            for (const row of r.data) {
+                const aiCls = row.ai_suggestion==='清仓'?'action-clear':(row.ai_suggestion==='减仓'?'action-reduce':(row.ai_suggestion==='增仓'?'action-add':'action-hold'));
+                const actCls = row.actual_action==='清仓'?'danger':(row.actual_action==='减仓'?'warning':(row.actual_action==='加仓'?'success':'secondary'));
+                const reviewBadge = row.review_status==='reviewed'
+                    ? `<span class="badge bg-success">已复盘</span>${row.review_outcome?' <span class="badge bg-info">'+escapeHtml(outcomeMap[row.review_outcome]||row.review_outcome)+'</span>':''}`
+                    : '<span class="badge bg-secondary">待复盘</span>';
+                const reviewBtn = row.review_status !== 'reviewed'
+                    ? `<button class="btn btn-xs btn-outline-info" style="font-size:11px;padding:1px 6px;" onclick="openReviewModal(${row.id},'${escapeHtml(row.holding_code)}','${escapeHtml(row.holding_name||'')}','${escapeHtml(row.actual_action)}')">复盘</button>`
+                    : '';
+                const opTime = row.operated_at ? row.operated_at.substring(0,16).replace('T',' ') : '--';
+                html += `<tr>
+                    <td class="small">${opTime}</td>
+                    <td><strong>${escapeHtml(row.holding_name||row.holding_code)}</strong><br><small class="text-muted">${escapeHtml(row.holding_code)}</small></td>
+                    <td>${row.ai_suggestion ? '<span class="action-badge '+aiCls+'">'+escapeHtml(row.ai_suggestion)+'</span>' : '--'}</td>
+                    <td><span class="badge bg-${actCls}">${escapeHtml(row.actual_action)}</span></td>
+                    <td class="small">${row.quantity_changed != null ? (row.quantity_changed > 0 ? '+' : '')+row.quantity_changed : '--'}</td>
+                    <td class="small">${row.price_at_action != null ? '¥'+Number(row.price_at_action).toFixed(4) : '--'}</td>
+                    <td class="small">${escapeHtml(row.notes||'--')}</td>
+                    <td>${reviewBadge}</td>
+                    <td>${reviewBtn}</td>
+                </tr>`;
+            }
+            $('#actionHistoryList').html(html);
+        }
+    });
+}
+
+function openReviewModal(id, code, name, action) {
+    $('#reviewActionId').val(id);
+    $('#reviewActionSummary').html(`<strong>${escapeHtml(name||code)}</strong> 执行了 <strong>${escapeHtml(action)}</strong>，请填写复盘结论。`);
+    $('#reviewOutcome').val('profit'); $('#reviewNotes').val('');
+    $('#reviewActionModal').modal('show');
+}
+
+$('#confirmReviewBtn').on('click', function() {
+    const id = $('#reviewActionId').val();
+    $.ajax({
+        url: '/api/holdings/actions/' + id + '/review', method: 'PUT',
+        contentType: 'application/json',
+        data: JSON.stringify({ review_outcome: $('#reviewOutcome').val(), review_notes: $('#reviewNotes').val() }),
+        success: function(r) {
+            if (r.code === 200) { $('#reviewActionModal').modal('hide'); showToast('复盘已保存', 'success'); loadActionHistory(); }
+            else { showToast('保存失败: '+r.message, 'error'); }
+        }
+    });
+});
+
+$('#actionFilterStatus').on('change', loadActionHistory);
 </script>
 {% endblock %}

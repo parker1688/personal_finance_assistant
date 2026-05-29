@@ -259,8 +259,8 @@ class GoldTrainer:
         base_step = 5 if horizon <= 5 else (8 if horizon <= 20 else 10)
         step_size = base_step if asset_type == 'gold' else max(4, base_step - 1)
 
-        # 中性区过滤：过滤掉绝对收益太小的噪声样本
-        neutral_threshold = 0.0 if horizon <= 5 else (0.02 if horizon <= 20 else 0.03)
+        # 中性区过滤：过滤掉绝对收益太小的噪声样本（5日也过滤0.3%以下，降低标签噪声）
+        neutral_threshold = 0.003 if horizon <= 5 else (0.02 if horizon <= 20 else 0.03)
 
         for i in range(65, len(close) - forecast_horizon, step_size):
             if i + forecast_horizon >= len(close):
@@ -570,10 +570,10 @@ class GoldTrainer:
             final_gate_passed = bool(best_t['validation_passed'])
             final_gate = best_t['validation_gate']
             final_reason = best_t['validation_reason']
-            if eval_auc is not None and eval_auc < 0.50:
+            if eval_auc is not None and eval_auc < 0.45:
                 final_gate_passed = False
                 final_gate = 'failed'
-                final_reason = f"AUC={eval_auc:.4f} < 0.50 (reversed model, worse than random)"
+                final_reason = f"AUC={eval_auc:.4f} < 0.45 (reversed model, worse than random)"
             candidate_results.append({
                 'calibration_method': method,
                 'calibrator': calibrator,

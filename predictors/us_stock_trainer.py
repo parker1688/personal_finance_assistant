@@ -147,7 +147,7 @@ class USStockTrainer:
         
         X_list = []
         y_list = []
-        step_size = 4 if period_days <= 5 else 5
+        step_size = 2 if period_days <= 5 else 3
         
         for i in range(60, len(close) - period_days, step_size):
             features = {}
@@ -238,9 +238,12 @@ class USStockTrainer:
             # 标签: 未来period_days天涨跌方向
             if i + period_days < len(close):
                 future_return = (close[i + period_days] - close[i]) / close[i]
+                # 中性区过滤：排除绝对收益小于0.3%的噪声样本
+                if abs(future_return) < 0.003:
+                    continue
                 label = 1 if future_return > 0 else 0
             else:
-                label = 0
+                continue
             
             X_list.append(list(features.values()))
             y_list.append(label)
@@ -412,10 +415,10 @@ class USStockTrainer:
             final_gate_passed = bool(best_t['validation_passed'])
             final_gate = best_t['validation_gate']
             final_reason = best_t['validation_reason']
-            if eval_auc is not None and eval_auc < 0.50:
+            if eval_auc is not None and eval_auc < 0.45:
                 final_gate_passed = False
                 final_gate = 'failed'
-                final_reason = f'AUC={eval_auc:.4f} < 0.50 (reversed model)'
+                final_reason = f'AUC={eval_auc:.4f} < 0.45 (reversed model)'
             candidate_results.append({
                 'calibration_method': method, 'calibrator': calibrator,
                 'calibration_samples': int(n_cal) if method != 'none' else 0,

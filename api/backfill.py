@@ -190,7 +190,7 @@ def _collect_etf_history_dataset(years=3):
         from recommenders.etf_recommender import ETFRecommender
         etf_funds.extend([
             {
-                'code': str(item.get('code') or '').strip(),
+                'code': str(item.get('code') or '').strip().split('.')[0],  # strip exchange suffix
                 'name': str(item.get('name') or item.get('code') or '').strip(),
                 'type': 'etf',
             }
@@ -202,26 +202,27 @@ def _collect_etf_history_dataset(years=3):
 
     if not etf_funds:
         etf_funds = [
-            {'code': '510300.SH', 'name': '沪深300ETF', 'type': 'etf'},
-            {'code': '510500.SH', 'name': '中证500ETF', 'type': 'etf'},
-            {'code': '510050.SH', 'name': '上证50ETF', 'type': 'etf'},
-            {'code': '159915.SZ', 'name': '创业板ETF', 'type': 'etf'},
-            {'code': '588000.SH', 'name': '科创50ETF', 'type': 'etf'},
-            {'code': '512880.SH', 'name': '证券ETF', 'type': 'etf'},
-            {'code': '512690.SH', 'name': '酒ETF', 'type': 'etf'},
-            {'code': '515030.SH', 'name': '新能源车ETF', 'type': 'etf'},
-            {'code': '512010.SH', 'name': '医药ETF', 'type': 'etf'},
-            {'code': '518880.SH', 'name': '黄金ETF', 'type': 'etf'},
+            {'code': '510300', 'name': '沪深300ETF', 'type': 'etf'},
+            {'code': '510500', 'name': '中证500ETF', 'type': 'etf'},
+            {'code': '510050', 'name': '上证50ETF', 'type': 'etf'},
+            {'code': '159915', 'name': '创业板ETF', 'type': 'etf'},
+            {'code': '588000', 'name': '科创50ETF', 'type': 'etf'},
+            {'code': '512880', 'name': '证券ETF', 'type': 'etf'},
+            {'code': '512690', 'name': '酒ETF', 'type': 'etf'},
+            {'code': '515030', 'name': '新能源车ETF', 'type': 'etf'},
+            {'code': '512010', 'name': '医药ETF', 'type': 'etf'},
+            {'code': '518880', 'name': '黄金ETF', 'type': 'etf'},
         ]
 
     deduped = []
     seen = set()
     for item in etf_funds:
-        code = str(item.get('code') or '').strip()
+        # ak.fund_open_fund_info_em 只接受不带交易所后缀的6位代码
+        code = str(item.get('code') or '').strip().split('.')[0]
         if not code or code in seen:
             continue
         seen.add(code)
-        deduped.append(item)
+        deduped.append({**item, 'code': code})
 
     collected = collector.collect_funds_batch(funds=deduped[:50], years=years, limit=None)
     exported_rows = _export_raw_stock_csv('historical_etf.csv', codes=[item['code'] for item in deduped])
@@ -540,15 +541,22 @@ def _sync_latest_daily_prices(window_days=30):
             nav = float(row.nav or 0)
             if not base_code or nav <= 0:
                 continue
+            # 统一使用累计净值作为 close，与 backfill_recommendation_history 保持一致
+            # 若无累计净值，或 accum/unit 比值 > 10（数据异常），则使用单位净值
+            acc_nav = float(row.accumulated_nav or 0)
+            if acc_nav > 0 and acc_nav / nav <= 10:
+                close_nav = acc_nav
+            else:
+                close_nav = nav
             synced += _upsert_daily_price(
                 session,
                 code=base_code,
                 date_value=row.date,
-                close_price=nav,
+                close_price=close_nav,
                 market='FUND',
-                open_price=nav,
-                high_price=float(row.accumulated_nav or nav),
-                low_price=nav,
+                open_price=close_nav,
+                high_price=close_nav,
+                low_price=close_nav,
                 volume=0,
             )
 
@@ -790,10 +798,16 @@ def _expected_freshness_days(item):
         return 14
     if '基金净值' in name:
         return 5
+    # 融资融券、北向资金、龙虎榜等存在节假日与源端延迟，
+    # 宽松一些阈值，避免“数据源未更新”被误判为本地采集失败。
+    if name == '融资融券CSV':
+        return 12
+    if name in ('北向资金CSV', '龙虎榜CSV'):
+        return 8
     if name in (
         'A股历史行情CSV', '港股历史行情CSV', '美股历史行情CSV',
         'ETF历史行情CSV', '贵金属历史CSV', '黄金价格CSV', '白银价格CSV',
-        '新闻舆情CSV', '资金流CSV', '北向资金CSV', '融资融券CSV', '龙虎榜CSV',
+        '新闻舆情CSV', '资金流CSV',
         '日度估值CSV', '财务指标CSV',
     ):
         return 4
@@ -802,6 +816,17 @@ def _expected_freshness_days(item):
     if category in ('数据库', '推荐覆盖', '训练特征', 'CSV文件'):
         return 4
     return None
+
+
+def _source_lag_grace_days(item):
+    """特定数据源的延迟宽限天数：超过 freshness 但仍可能是上游未更新。"""
+    name = str(item.get('name') or '').strip()
+    grace_map = {
+        '融资融券CSV': 20,
+        '北向资金CSV': 14,
+        '龙虎榜CSV': 14,
+    }
+    return grace_map.get(name)
 
 
 def _decorate_inventory_item(item, reference_time=None):
@@ -829,12 +854,18 @@ def _decorate_inventory_item(item, reference_time=None):
 
     if latest_dt:
         freshness_days = _expected_freshness_days(item)
+        source_lag_grace_days = _source_lag_grace_days(item)
         age_days = max((reference_time - latest_dt).total_seconds() / 86400.0, 0.0)
         item['lag_days'] = round(age_days, 2)
         if freshness_days is not None and age_days > freshness_days:
-            item['status'] = 'stale'
-            item['status_text'] = '待补采'
-            item['note'] = f'最近约 {int(age_days)} 天未更新，建议执行单项补采'
+            if source_lag_grace_days is not None and age_days <= source_lag_grace_days:
+                item['status'] = 'source_lag'
+                item['status_text'] = '源端未更新'
+                item['note'] = f'最近约 {int(age_days)} 天未更新，疑似数据源尚未发布，建议稍后再试'
+            else:
+                item['status'] = 'stale'
+                item['status_text'] = '待补采'
+                item['note'] = f'最近约 {int(age_days)} 天未更新，建议执行单项补采'
         else:
             item['status'] = 'ready'
             item['status_text'] = '正常'
@@ -947,10 +978,12 @@ def _build_dataset_inventory():
             item = _decorate_inventory_item(item)
             collect_key = _get_inventory_collect_key(item)
             spec = collect_specs.get(collect_key)
-            item['collectable'] = bool(spec)
+            # 源端未更新时不建议触发补采，避免重复空跑。
+            item['collectable'] = bool(spec) and item.get('status') != 'source_lag'
             item['collect_key'] = collect_key if spec else ''
             item['collect_action_text'] = (
-                '立即补采' if bool(spec) and item.get('status') in ('empty', 'stale') else ('单独刷新' if bool(spec) else '')
+                '立即补采' if bool(spec) and item.get('status') in ('empty', 'stale')
+                else ('等待源端更新' if bool(spec) and item.get('status') == 'source_lag' else ('单独刷新' if bool(spec) else ''))
             )
 
         return inventories

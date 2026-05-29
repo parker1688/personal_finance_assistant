@@ -419,6 +419,81 @@ class ReflectionLearner:
         if self._owns_session and self.session is not None:
             self.session.close()
 
+    # ──────────────────────────────────────────────────────────────────
+    # 7. 自适应阈值调参建议
+    # ──────────────────────────────────────────────────────────────────
+    def suggest_threshold_adjustment(self, days: int = 30, min_samples: int = 10) -> dict:
+        """基于近 N 天 5日预测错误率，建议 decision_threshold 调整方向和幅度。
+
+        返回 dict:
+          {
+            'delta': float,            # 建议调整量（正=收紧，负=放松）
+            'new_threshold': float,    # 基于当前有效阈值 + delta
+            'error_rate': float,       # 5日预测错误率（百分比）
+            'total_5d': int,           # 5日样本数
+            'reason': str,             # 文字说明
+            'action': str,             # 'tighten' / 'loosen' / 'hold'
+          }
+        """
+        from trader.profile_config import get_active_profile  # 延迟导入避免循环
+
+        cutoff = datetime.now().date() - timedelta(days=days)
+        preds_5d = self.session.query(Prediction).filter(
+            Prediction.period_days == 5,
+            Prediction.expiry_date >= cutoff,
+            Prediction.is_expired == True,
+            Prediction.is_direction_correct.isnot(None),
+        ).all()
+
+        total = len(preds_5d)
+        if total < min_samples:
+            return {
+                'delta': 0.0,
+                'new_threshold': None,
+                'error_rate': None,
+                'total_5d': total,
+                'reason': f'5日样本不足（{total}/{min_samples}），暂不调整',
+                'action': 'hold',
+            }
+
+        errors = sum(1 for p in preds_5d if not p.is_direction_correct)
+        error_rate = errors / total * 100.0
+
+        profile = get_active_profile()
+        current_threshold = float(profile.get('decision_threshold', 0.60))
+
+        if error_rate > 50.0:
+            delta = +0.04
+            action = 'tighten'
+            reason = f'5日错误率 {error_rate:.1f}% > 50%，大幅收紧入场阈值 +0.04'
+        elif error_rate > 40.0:
+            delta = +0.02
+            action = 'tighten'
+            reason = f'5日错误率 {error_rate:.1f}% > 40%，小幅收紧入场阈值 +0.02'
+        elif error_rate < 20.0:
+            delta = -0.01
+            action = 'loosen'
+            reason = f'5日错误率 {error_rate:.1f}% < 20%，模型表现良好，适当放松入场阈值 -0.01'
+        else:
+            delta = 0.0
+            action = 'hold'
+            reason = f'5日错误率 {error_rate:.1f}% 处于正常区间（20%~40%），保持现有阈值'
+
+        new_threshold = round(current_threshold + delta, 4) if delta != 0.0 else current_threshold
+
+        logger.info(
+            f"[自适应调参] 5日错误率={error_rate:.1f}%(n={total})，"
+            f"当前阈值={current_threshold:.4f}，建议={action}，delta={delta:+.2f}，新阈值={new_threshold:.4f}"
+        )
+        return {
+            'delta': delta,
+            'new_threshold': new_threshold,
+            'error_rate': round(error_rate, 2),
+            'total_5d': total,
+            'reason': reason,
+            'action': action,
+        }
+
 
 if __name__ == '__main__':
     learner = ReflectionLearner()

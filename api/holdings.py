@@ -15,7 +15,7 @@ from flask import jsonify, request, send_file
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import get_session, Holding, Recommendation, Prediction, RawFundData, RawStockData, Warning as WarningModel
+from models import get_session, Holding, Recommendation, Prediction, RawFundData, RawStockData, DailyPrice, HoldingAction, Warning as WarningModel
 from utils import get_logger, get_today, SimpleCache
 
 try:
@@ -65,14 +65,79 @@ def _get_latest_recommendation_price(target_code, target_type):
     return None
 
 
+def _get_latest_rawstock_close_price(code):
+    """读取 RawStockData / DailyPrice 中最新收盘价，支持多格式代码匹配。"""
+    session = None
+    try:
+        session = get_session()
+        variants = _build_code_lookup_variants(code) if code else []
+        if not variants:
+            return None, None
+        # 优先 raw_stock_data（采集器每日更新）
+        row = (
+            session.query(RawStockData)
+            .filter(RawStockData.code.in_(variants))
+            .filter(RawStockData.close.isnot(None))
+            .order_by(RawStockData.date.desc(), RawStockData.created_at.desc())
+            .first()
+        )
+        if row and row.close and float(row.close) > 0:
+            return float(row.close), row.date
+        # 回退 daily_prices
+        dp = (
+            session.query(DailyPrice)
+            .filter(DailyPrice.code.in_(variants))
+            .filter(DailyPrice.close.isnot(None))
+            .order_by(DailyPrice.date.desc())
+            .first()
+        )
+        if dp and dp.close and float(dp.close) > 0:
+            return float(dp.close), dp.date
+    except Exception as e:
+        logger.warning(f"读取本地股票收盘价失败 {code}: {e}")
+    finally:
+        if session:
+            session.close()
+    return None, None
+
+
+def _fetch_akshare_spot_price(code, asset_type='stock'):
+    """通过 AkShare spot 接口获取 A 股 / ETF 实时最新价（交易时段有效）。"""
+    try:
+        import akshare as ak
+        normalized = str(code or '').strip().upper()
+        base = normalized.split('.')[0]
+        if not base:
+            return None
+        if asset_type in ('stock', 'etf') and (normalized.endswith('.SH') or normalized.endswith('.SZ') or base.isdigit()):
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty and '代码' in df.columns and '最新价' in df.columns:
+                match = df[df['代码'].astype(str).str.strip() == base]
+                if not match.empty:
+                    price = pd.to_numeric(match.iloc[0]['最新价'], errors='coerce')
+                    if pd.notna(price) and float(price) > 0:
+                        return float(price)
+        if normalized.endswith('.HK'):
+            df = ak.stock_hk_spot_em()
+            if df is not None and not df.empty and '代码' in df.columns and '最新价' in df.columns:
+                match = df[df['代码'].astype(str).str.strip() == base]
+                if not match.empty:
+                    price = pd.to_numeric(match.iloc[0]['最新价'], errors='coerce')
+                    if pd.notna(price) and float(price) > 0:
+                        return float(price)
+    except Exception as e:
+        logger.debug(f"AkShare spot 行情失败 {code}: {e}")
+    return None
+
+
 def _get_latest_raw_fund_nav_price(code):
-    """优先读取本地已落库的最新基金净值。"""
+    """读取本地已落库的最新基金净值，返回 (nav, date) 元组，无数据时返回 (None, None)。"""
     session = None
     try:
         session = get_session()
         variants = _normalize_fund_code_variants(code)
         if not variants:
-            return None
+            return None, None
         row = (
             session.query(RawFundData)
             .filter(RawFundData.code.in_(variants))
@@ -81,13 +146,13 @@ def _get_latest_raw_fund_nav_price(code):
             .first()
         )
         if row and row.nav and float(row.nav) > 0:
-            return float(row.nav)
+            return float(row.nav), row.date
     except Exception as e:
         logger.warning(f"读取本地基金净值失败 {code}: {e}")
     finally:
         if session:
             session.close()
-    return None
+    return None, None
 
 
 def _fetch_live_fund_nav_price(code):
@@ -594,20 +659,77 @@ def get_current_price(code, asset_type='stock'):
 
     try:
         if asset_type == 'fund':
-            local_nav = _get_latest_raw_fund_nav_price(code)
+            local_nav, local_nav_date = _get_latest_raw_fund_nav_price(code)
+            nav_days_old = (get_today() - local_nav_date).days if local_nav_date else 999
+            # 检测占位数据：nav 恰好为整数 1（1.0000）时视为无效占位，强制走实时
+            nav_is_placeholder = local_nav is not None and abs(local_nav - round(local_nav)) < 1e-6 and int(round(local_nav)) == 1
+            # 本地 NAV 时效性检查：超过 5 天视为过期，优先尝试实时拉取
+            if local_nav is not None and nav_days_old <= 5 and not nav_is_placeholder:
+                price = round(float(local_nav), 4)
+                price_cache.set(cache_key, price)
+                logger.debug(f"使用本地基金净值 {code}: {price}（{local_nav_date}，{nav_days_old}天前）")
+                return price
+            # 本地过期或无数据 → 实时拉取
+            live_nav = _fetch_live_fund_nav_price(code)
+            if live_nav is not None:
+                price = round(float(live_nav), 4)
+                price_cache.set(cache_key, price)
+                logger.info(f"实时基金净值 {code}: {price}")
+                return price
+            # 实时失败 → 降级用本地过期数据（总比没有好）
             if local_nav is not None:
                 price = round(float(local_nav), 4)
                 price_cache.set(cache_key, price)
+                logger.warning(f"基金 {code} 实时净值失败，使用 {nav_days_old}天前 本地数据 {price}")
                 return price
+            # 最后回退到推荐快照
+            fallback_fund = _get_latest_recommendation_price(code, rec_type)
+            if fallback_fund is not None:
+                price = round(float(fallback_fund), 4)
+                price_cache.set(cache_key, price)
+                return price
+            return None
+
+        # 股票/ETF: 优先读本地 RawStockData（每日采集器更新的最新收盘价）
+        if asset_type in ('stock', 'etf'):
+            local_close, local_date = _get_latest_rawstock_close_price(code)
+            if local_close is not None:
+                # 数据不超过 3 个交易日则认为有效
+                from datetime import date as _date
+                days_old = (get_today() - local_date).days if local_date else 999
+                if days_old <= 5:
+                    price = round(float(local_close), 4)
+                    price_cache.set(cache_key, price)
+                    logger.debug(f"使用本地收盘价 {code}: {price}（{local_date}，{days_old}天前）")
+                    return price
 
         fallback = _get_latest_recommendation_price(code, rec_type)
         live_market_enabled = os.environ.get('ENABLE_LIVE_MARKET_FETCH', 'false').lower() == 'true'
-        if not live_market_enabled and asset_type != 'fund':
+
+        # 实时模式：先尝试 AkShare spot（仅股票/ETF），再 yfinance
+        if live_market_enabled and asset_type in ('stock', 'etf'):
+            spot_price = _fetch_akshare_spot_price(code, asset_type)
+            if spot_price is not None:
+                price = round(float(spot_price), 4)
+                price_cache.set(cache_key, price)
+                logger.info(f"AkShare spot 实时价 {code}: {price}")
+                return price
+
+        if not live_market_enabled and asset_type not in ('fund', 'stock', 'etf'):
             if fallback is not None:
                 price = round(float(fallback), 2)
                 price_cache.set(cache_key, price)
                 return price
             logger.info(f"实时行情安全模式已启用，{code} 使用本地快照/成本价")
+            return None
+
+        if not live_market_enabled and asset_type in ('stock', 'etf'):
+            # 本地 RawStockData 已过期或无数据，用推荐快照
+            if fallback is not None:
+                price = round(float(fallback), 2)
+                price_cache.set(cache_key, price)
+                return price
+            logger.info(f"实时行情安全模式已启用，{code} 无本地收盘价，使用成本价")
             return None
 
         # 黄金
@@ -677,19 +799,6 @@ def get_current_price(code, asset_type='stock'):
 
             if fallback is not None:
                 price = float(fallback)
-                price_cache.set(cache_key, price)
-                return price
-
-        # 场外基金：优先本地NAV，其次尝试实时净值接口（即使安全模式也允许）
-        if asset_type == 'fund':
-            live_nav = _fetch_live_fund_nav_price(code)
-            if live_nav is not None:
-                price = round(float(live_nav), 4)
-                price_cache.set(cache_key, price)
-                return price
-
-            if fallback is not None:
-                price = round(float(fallback), 4)
                 price_cache.set(cache_key, price)
                 return price
 
@@ -1566,3 +1675,118 @@ def register_holdings_routes(app):
                 'message': str(e),
                 'timestamp': datetime.now().isoformat()
             }), 500
+
+    # ── 持仓操作记录 ──────────────────────────────────────────────────────
+
+    @app.route('/api/holdings/actions', methods=['POST'])
+    def record_holding_action():
+        """记录管理员对某持仓执行的操作（加仓/减仓/清仓/持有/跳过）。"""
+        try:
+            data = request.get_json(force=True) or {}
+            code = str(data.get('holding_code') or '').strip().upper()
+            actual_action = str(data.get('actual_action') or '').strip()
+            if not code or not actual_action:
+                return jsonify({'code': 400, 'status': 'error', 'message': '缺少 holding_code 或 actual_action'}), 400
+            valid_actions = {'加仓', '减仓', '清仓', '持有', '跳过'}
+            if actual_action not in valid_actions:
+                return jsonify({'code': 400, 'status': 'error', 'message': f'actual_action 必须为 {valid_actions}'}), 400
+
+            session = get_session()
+            try:
+                action_obj = HoldingAction(
+                    holding_code=code,
+                    holding_name=str(data.get('holding_name') or '').strip() or None,
+                    asset_type=str(data.get('asset_type') or '').strip() or None,
+                    ai_suggestion=str(data.get('ai_suggestion') or '').strip() or None,
+                    ai_reason=str(data.get('ai_reason') or '').strip() or None,
+                    ai_level=str(data.get('ai_level') or '').strip() or None,
+                    actual_action=actual_action,
+                    quantity_changed=float(data['quantity_changed']) if data.get('quantity_changed') not in (None, '') else None,
+                    price_at_action=float(data['price_at_action']) if data.get('price_at_action') not in (None, '') else None,
+                    notes=str(data.get('notes') or '').strip() or None,
+                    review_status='pending',
+                )
+                session.add(action_obj)
+                session.commit()
+                action_id = action_obj.id
+            finally:
+                session.close()
+
+            logger.info(f"持仓操作记录: {code} {actual_action} (id={action_id})")
+            return jsonify({
+                'code': 200,
+                'status': 'success',
+                'data': {'id': action_id},
+                'message': '操作记录已保存',
+                'timestamp': datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"记录持仓操作失败: {e}")
+            return jsonify({'code': 500, 'status': 'error', 'message': str(e)}), 500
+
+    @app.route('/api/holdings/actions', methods=['GET'])
+    def get_holding_actions():
+        """查询持仓操作历史记录（支持 code 过滤、分页）。"""
+        try:
+            code = request.args.get('code', '').strip().upper()
+            review_status = request.args.get('review_status', '').strip()
+            limit = min(int(request.args.get('limit', 50)), 200)
+            session = get_session()
+            try:
+                q = session.query(HoldingAction).order_by(HoldingAction.operated_at.desc())
+                if code:
+                    q = q.filter(HoldingAction.holding_code == code)
+                if review_status:
+                    q = q.filter(HoldingAction.review_status == review_status)
+                rows = q.limit(limit).all()
+                result = []
+                for r in rows:
+                    result.append({
+                        'id': r.id,
+                        'holding_code': r.holding_code,
+                        'holding_name': r.holding_name or r.holding_code,
+                        'asset_type': r.asset_type,
+                        'ai_suggestion': r.ai_suggestion,
+                        'ai_reason': r.ai_reason,
+                        'ai_level': r.ai_level,
+                        'actual_action': r.actual_action,
+                        'quantity_changed': r.quantity_changed,
+                        'price_at_action': r.price_at_action,
+                        'notes': r.notes,
+                        'operated_at': r.operated_at.isoformat() if r.operated_at else None,
+                        'review_status': r.review_status,
+                        'review_outcome': r.review_outcome,
+                        'review_notes': r.review_notes,
+                        'reviewed_at': r.reviewed_at.isoformat() if r.reviewed_at else None,
+                    })
+            finally:
+                session.close()
+            return jsonify({'code': 200, 'status': 'success', 'data': result, 'timestamp': datetime.now().isoformat()})
+        except Exception as e:
+            logger.error(f"查询持仓操作记录失败: {e}")
+            return jsonify({'code': 500, 'status': 'error', 'message': str(e)}), 500
+
+    @app.route('/api/holdings/actions/<int:action_id>/review', methods=['PUT'])
+    def review_holding_action(action_id):
+        """更新操作记录的复盘结论。"""
+        try:
+            data = request.get_json(force=True) or {}
+            outcome = str(data.get('review_outcome') or '').strip()
+            if outcome not in ('profit', 'loss', 'neutral', ''):
+                return jsonify({'code': 400, 'status': 'error', 'message': 'review_outcome 必须为 profit/loss/neutral'}), 400
+            session = get_session()
+            try:
+                row = session.query(HoldingAction).filter(HoldingAction.id == action_id).first()
+                if not row:
+                    return jsonify({'code': 404, 'status': 'error', 'message': '记录不存在'}), 404
+                row.review_status = 'reviewed'
+                row.review_outcome = outcome or None
+                row.review_notes = str(data.get('review_notes') or '').strip() or None
+                row.reviewed_at = datetime.now()
+                session.commit()
+            finally:
+                session.close()
+            return jsonify({'code': 200, 'status': 'success', 'message': '复盘已更新', 'timestamp': datetime.now().isoformat()})
+        except Exception as e:
+            logger.error(f"更新操作复盘失败: {e}")
+            return jsonify({'code': 500, 'status': 'error', 'message': str(e)}), 500

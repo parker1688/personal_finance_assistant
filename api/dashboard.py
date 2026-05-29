@@ -17,7 +17,7 @@ from sqlalchemy import text, func, case
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import get_session, Warning, Holding, Recommendation, AccuracyStat, ModelVersion, Prediction
+from models import get_session, Warning, Holding, HoldingSnapshot, Recommendation, AccuracyStat, ModelVersion, Prediction
 from utils import get_logger, get_today, SimpleCache
 from predictors.model_manager import ModelManager
 
@@ -25,6 +25,145 @@ logger = get_logger(__name__)
 market_temp_cache = SimpleCache(ttl=300)
 dashboard_insight_cache = SimpleCache(ttl=180)
 _MODEL_MANAGER = ModelManager()
+_MIN_ACTION_BACKTEST_SAMPLE_SIZE = 20
+
+
+def _build_runtime_model_catalog():
+    return [
+        {'asset_type': 'a_stock', 'label': 'A股', 'period_days': 5, 'path': os.path.join('data', 'models', 'short_term_model.pkl')},
+        {'asset_type': 'a_stock', 'label': 'A股', 'period_days': 20, 'path': os.path.join('data', 'models', 'medium_term_model.pkl')},
+        {'asset_type': 'a_stock', 'label': 'A股', 'period_days': 60, 'path': os.path.join('data', 'models', 'long_term_model.pkl')},
+        {'asset_type': 'hk_stock', 'label': '港股', 'period_days': 5, 'path': os.path.join('data', 'models', 'hk_stock_short_term_model.pkl')},
+        {'asset_type': 'hk_stock', 'label': '港股', 'period_days': 20, 'path': os.path.join('data', 'models', 'hk_stock_medium_term_model.pkl')},
+        {'asset_type': 'hk_stock', 'label': '港股', 'period_days': 60, 'path': os.path.join('data', 'models', 'hk_stock_long_term_model.pkl')},
+        {'asset_type': 'us_stock', 'label': '美股', 'period_days': 5, 'path': os.path.join('data', 'models', 'us_stock_short_term_model.pkl')},
+        {'asset_type': 'us_stock', 'label': '美股', 'period_days': 20, 'path': os.path.join('data', 'models', 'us_stock_medium_term_model.pkl')},
+        {'asset_type': 'us_stock', 'label': '美股', 'period_days': 60, 'path': os.path.join('data', 'models', 'us_stock_long_term_model.pkl')},
+        {'asset_type': 'active_fund', 'label': '主动基金', 'period_days': 5, 'path': os.path.join('data', 'models', 'fund_short_term_model.pkl')},
+        {'asset_type': 'active_fund', 'label': '主动基金', 'period_days': 20, 'path': os.path.join('data', 'models', 'fund_medium_term_model.pkl')},
+        {'asset_type': 'active_fund', 'label': '主动基金', 'period_days': 60, 'path': os.path.join('data', 'models', 'fund_long_term_model.pkl')},
+        {'asset_type': 'etf', 'label': 'ETF', 'period_days': 5, 'path': os.path.join('data', 'models', 'etf_short_term_model.pkl')},
+        {'asset_type': 'etf', 'label': 'ETF', 'period_days': 20, 'path': os.path.join('data', 'models', 'etf_medium_term_model.pkl')},
+        {'asset_type': 'etf', 'label': 'ETF', 'period_days': 60, 'path': os.path.join('data', 'models', 'etf_long_term_model.pkl')},
+        {'asset_type': 'gold', 'label': '黄金', 'period_days': 5, 'path': os.path.join('data', 'models', 'gold_short_term_model.pkl')},
+        {'asset_type': 'gold', 'label': '黄金', 'period_days': 20, 'path': os.path.join('data', 'models', 'gold_medium_term_model.pkl')},
+        {'asset_type': 'gold', 'label': '黄金', 'period_days': 60, 'path': os.path.join('data', 'models', 'gold_long_term_model.pkl')},
+        {'asset_type': 'silver', 'label': '白银', 'period_days': 5, 'path': os.path.join('data', 'models', 'silver_short_term_model.pkl')},
+        {'asset_type': 'silver', 'label': '白银', 'period_days': 20, 'path': os.path.join('data', 'models', 'silver_medium_term_model.pkl')},
+        {'asset_type': 'silver', 'label': '白银', 'period_days': 60, 'path': os.path.join('data', 'models', 'silver_long_term_model.pkl')},
+    ]
+
+
+def _get_model_health_overview():
+    model_rows = []
+    for item in _build_runtime_model_catalog():
+        runtime_bundle = _MODEL_MANAGER.load_runtime_model_bundle(item['path'], period_days=item['period_days'], allow_legacy=None)
+        metadata = runtime_bundle.get('metadata') or {}
+        model_rows.append({
+            'asset_type': item['asset_type'],
+            'asset_label': item['label'],
+            'label': f"{item['label']}{item['period_days']}日",
+            'period_days': item['period_days'],
+            'passed': bool(runtime_bundle.get('loaded')),
+            'gate': runtime_bundle.get('gate', 'failed'),
+            'version': metadata.get('version') or os.path.basename(item['path']),
+            'accuracy': _safe_float(metadata.get('validation_accuracy'), None),
+            'f1': _safe_float(metadata.get('validation_f1'), None),
+            'auc': _safe_float(metadata.get('validation_auc'), None),
+            'brier': _safe_float(metadata.get('validation_brier'), None),
+            'reason': runtime_bundle.get('reason', ''),
+        })
+
+    passed_count = sum(1 for item in model_rows if item['passed'])
+    asset_groups = []
+    for asset_type in ['a_stock', 'hk_stock', 'us_stock', 'active_fund', 'etf', 'gold', 'silver']:
+        rows = [item for item in model_rows if item['asset_type'] == asset_type]
+        if not rows:
+            continue
+        asset_groups.append({
+            'asset_type': asset_type,
+            'label': rows[0]['asset_label'],
+            'passed_count': sum(1 for item in rows if item['passed']),
+            'total_models': len(rows),
+            'status': 'healthy' if all(item['passed'] for item in rows) else ('warning' if any(item['passed'] for item in rows) else 'risk'),
+        })
+
+    return {
+        'overall_status': 'healthy' if passed_count == len(model_rows) else ('warning' if passed_count > 0 else 'risk'),
+        'passed_count': passed_count,
+        'total_models': len(model_rows),
+        'asset_groups': asset_groups,
+        'models': model_rows,
+    }
+
+
+def _build_portfolio_overview(session, holdings, high_warnings, medium_warnings, low_warnings):
+    latest_snapshot_date = session.query(func.max(HoldingSnapshot.snapshot_date)).scalar()
+    snapshot_values = {}
+    if latest_snapshot_date:
+        snapshot_rows = session.query(
+            HoldingSnapshot.holding_id,
+            HoldingSnapshot.market_value,
+        ).filter(
+            HoldingSnapshot.snapshot_date == latest_snapshot_date
+        ).all()
+        snapshot_values = {
+            int(holding_id): max(0.0, _safe_float(market_value))
+            for holding_id, market_value in snapshot_rows
+            if holding_id is not None
+        }
+
+    holding_values = []
+    snapshot_covered = 0
+    for holding in holdings:
+        snapshot_value = snapshot_values.get(int(holding.id))
+        if snapshot_value is not None and snapshot_value > 0:
+            holding_values.append(snapshot_value)
+            snapshot_covered += 1
+        else:
+            holding_values.append(max(0.0, _safe_float(holding.cost_price) * _safe_float(holding.quantity)))
+
+    holding_count = len(holdings)
+    total_holding_value = round(sum(holding_values), 2)
+    concentration_ratio_pct = round((max(holding_values) / total_holding_value * 100), 1) if total_holding_value > 0 and holding_values else 0.0
+    portfolio_risk = 'high' if concentration_ratio_pct >= 45 or high_warnings >= 3 else ('medium' if concentration_ratio_pct >= 25 or high_warnings >= 1 or medium_warnings >= 1 else 'low')
+    portfolio_stance = 'defensive' if portfolio_risk == 'high' else ('balanced' if portfolio_risk == 'medium' else 'constructive')
+    recommended_cash_ratio_pct = 40 if portfolio_risk == 'high' else (25 if portfolio_risk == 'medium' else 15)
+    risk_label = {'high': '较高', 'medium': '中等', 'low': '较低'}.get(portfolio_risk, '中等')
+    health_score = 88
+    if holding_count <= 2 and holding_count > 0:
+        health_score -= 10
+    if concentration_ratio_pct >= 45:
+        health_score -= 22
+    elif concentration_ratio_pct >= 25:
+        health_score -= 10
+    if high_warnings >= 1:
+        health_score -= min(18, high_warnings * 6)
+    elif medium_warnings >= 2:
+        health_score -= 6
+    health_score = max(30, min(95, int(health_score))) if holding_count > 0 else 80
+
+    if holding_count == 0:
+        summary = '当前无持仓，建议先以观察和分散建仓为主。'
+    else:
+        basis_label = '最新快照市值' if snapshot_covered == holding_count and holding_count > 0 else ('快照/成本混合口径' if snapshot_covered > 0 else '成本口径')
+        snapshot_suffix = f'（基于 {latest_snapshot_date.isoformat()} 快照）' if latest_snapshot_date and snapshot_covered > 0 else ''
+        summary = f'当前组合{concentration_ratio_pct:.1f}%集中于单一资产，整体风险{risk_label}，建议保留约{recommended_cash_ratio_pct}%现金。估值口径：{basis_label}{snapshot_suffix}'
+
+    return {
+        'holding_count': holding_count,
+        'total_value': total_holding_value,
+        'concentration_ratio_pct': concentration_ratio_pct,
+        'health_score': health_score,
+        'overall_risk': portfolio_risk,
+        'stance': portfolio_stance,
+        'recommended_cash_ratio_pct': recommended_cash_ratio_pct,
+        'valuation_basis': 'snapshot' if snapshot_covered == holding_count and holding_count > 0 else ('mixed' if snapshot_covered > 0 else 'cost'),
+        'snapshot_coverage': snapshot_covered,
+        'snapshot_date': latest_snapshot_date.isoformat() if latest_snapshot_date and snapshot_covered > 0 else None,
+        'low_warning_count': int(low_warnings or 0),
+        'summary': summary,
+    }
 
 
 def _get_cached_market_temperature(session):
@@ -66,7 +205,9 @@ def _get_cached_action_backtest_summary():
         'take_profit_grade': 'N/A',
         'add_signal_grade': 'N/A',
         'has_action_samples': False,
+        'is_reliable': False,
         'sample_size': 0,
+        'sample_note': '暂无动作回测数据',
         'recommendation': '暂无动作回测数据'
     }
     try:
@@ -83,7 +224,17 @@ def _get_cached_action_backtest_summary():
                 'add_signal_grade': grade_info.get('add_signal_grade', 'N/A'),
                 'has_action_samples': bool(grade_info.get('has_action_samples', False)),
                 'sample_size': int(grade_info.get('sample_size', 0) or 0),
-                'recommendation': report.get('recommendations', '暂无动作回测数据')
+                'is_reliable': int(grade_info.get('sample_size', 0) or 0) >= _MIN_ACTION_BACKTEST_SAMPLE_SIZE,
+                'sample_note': (
+                    f"样本 {int(grade_info.get('sample_size', 0) or 0)} 条，统计稳定性有限"
+                    if int(grade_info.get('sample_size', 0) or 0) < _MIN_ACTION_BACKTEST_SAMPLE_SIZE
+                    else f"样本 {int(grade_info.get('sample_size', 0) or 0) } 条，统计稳定性较好"
+                ),
+                'recommendation': (
+                    '动作回测样本仍偏少，暂不建议据此高权重决策。'
+                    if int(grade_info.get('sample_size', 0) or 0) < _MIN_ACTION_BACKTEST_SAMPLE_SIZE
+                    else report.get('recommendations', '暂无动作回测数据')
+                )
             }
     except Exception as e:
         logger.warning(f"计算动作回测摘要失败: {e}")
@@ -133,6 +284,8 @@ def _build_advisor_brief(market_temp_detail, portfolio_overview, model_health, a
         bullets.append('模型状态仍需观察，建议降低单笔仓位并缩短复查周期。')
     elif not (action_backtest or {}).get('has_action_samples'):
         bullets.append(f"动作回测样本仍在积累中，当前仍有 {int(pending_validation_count or 0)} 条待验证预测。")
+    elif not (action_backtest or {}).get('is_reliable'):
+        bullets.append(f"动作回测样本仅 {int((action_backtest or {}).get('sample_size', 0) or 0)} 条，暂不建议据此高权重决策。")
     else:
         bullets.append(f"动作回测评级 {(action_backtest or {}).get('overall_grade', 'N/A')}，可作为辅助决策参考。")
 
@@ -218,7 +371,7 @@ def _build_advisor_workflow(today_recommendations, portfolio_overview, warning_s
                     {'label': '待验收', 'value': f'{pending_validation_count} 条'},
                 ],
                 'next_action': review_action,
-                'grade': action_backtest.get('overall_grade', 'N/A'),
+                'grade': action_backtest.get('overall_grade', 'N/A') if action_backtest.get('is_reliable') else '样本不足',
             },
         ]
     }
@@ -244,12 +397,14 @@ def register_dashboard_routes(app):
                 func.count(Warning.id),
                 func.sum(case((Warning.level == 'high', 1), else_=0)),
                 func.sum(case((Warning.level == 'medium', 1), else_=0)),
+                func.sum(case((Warning.level == 'low', 1), else_=0)),
             ).filter(
                 Warning.warning_time >= today_start
             ).one()
             today_warnings = int(warning_agg[0] or 0)
             high_warnings = int(warning_agg[1] or 0)
             medium_warnings = int(warning_agg[2] or 0)
+            low_warnings = int(warning_agg[3] or 0)
             
             # 获取最近一批可用推荐数量（避免当天未刷新时页面空白）
             recommendation_batch_date = _get_latest_recommendation_date(session, today=today)
@@ -323,10 +478,11 @@ def register_dashboard_routes(app):
                 bucket = trend_map.get(date, {'total': 0, 'correct': 0})
                 day_total = int(bucket['total'])
                 day_correct = int(bucket['correct'])
-                day_accuracy = (day_correct / day_total * 100) if day_total > 0 else 0
+                day_accuracy = round(day_correct / day_total * 100, 1) if day_total > 0 else None
                 accuracy_trend.append({
                     'date': date.isoformat(),
-                    'accuracy': round(day_accuracy, 1)
+                    'accuracy': day_accuracy,
+                    'sample_count': day_total,
                 })
             
             # 获取最近预警
@@ -337,7 +493,7 @@ def register_dashboard_routes(app):
             recent_warnings_list = []
             for w in recent_warnings:
                 recent_warnings_list.append({
-                    'time': w.warning_time.strftime('%H:%M'),
+                    'time': w.warning_time.strftime('%m-%d %H:%M'),
                     'code': w.code,
                     'name': w.name,
                     'type': w.warning_type,
@@ -347,99 +503,10 @@ def register_dashboard_routes(app):
             
             # 组合概览
             holdings = session.query(Holding).all()
-            holding_values = [max(0.0, _safe_float(h.cost_price) * _safe_float(h.quantity)) for h in holdings]
-            holding_count = len(holdings)
-            total_holding_value = round(sum(holding_values), 2)
-            concentration_ratio_pct = round((max(holding_values) / total_holding_value * 100), 1) if total_holding_value > 0 and holding_values else 0.0
-            portfolio_risk = 'high' if concentration_ratio_pct >= 45 or high_warnings >= 3 else ('medium' if concentration_ratio_pct >= 25 or today_warnings >= 1 else 'low')
-            portfolio_stance = 'defensive' if portfolio_risk == 'high' else ('balanced' if portfolio_risk == 'medium' else 'constructive')
-            recommended_cash_ratio_pct = 40 if portfolio_risk == 'high' else (25 if portfolio_risk == 'medium' else 15)
-            risk_label = {'high': '较高', 'medium': '中等', 'low': '较低'}.get(portfolio_risk, '中等')
-            health_score = 88
-            if holding_count <= 2 and holding_count > 0:
-                health_score -= 10
-            if concentration_ratio_pct >= 45:
-                health_score -= 22
-            elif concentration_ratio_pct >= 25:
-                health_score -= 10
-            if high_warnings >= 1:
-                health_score -= min(18, high_warnings * 6)
-            elif medium_warnings >= 2:
-                health_score -= 6
-            health_score = max(30, min(95, int(health_score))) if holding_count > 0 else 80
-            portfolio_overview = {
-                'holding_count': holding_count,
-                'total_value': total_holding_value,
-                'concentration_ratio_pct': concentration_ratio_pct,
-                'health_score': health_score,
-                'overall_risk': portfolio_risk,
-                'stance': portfolio_stance,
-                'recommended_cash_ratio_pct': recommended_cash_ratio_pct,
-                'summary': (
-                    '当前无持仓，建议先以观察和分散建仓为主。' if holding_count == 0 else
-                    f'当前组合{concentration_ratio_pct:.1f}%集中于单一资产，整体风险{risk_label}，建议保留约{recommended_cash_ratio_pct}%现金。'
-                )
-            }
+            portfolio_overview = _build_portfolio_overview(session, holdings, high_warnings, medium_warnings, low_warnings)
 
             # 模型健康概览
-            model_rows = []
-            passed_count = 0
-            runtime_files = {
-                5: os.path.join('data', 'models', 'short_term_model.pkl'),
-                20: os.path.join('data', 'models', 'medium_term_model.pkl'),
-                60: os.path.join('data', 'models', 'long_term_model.pkl'),
-            }
-            for period in [5, 20, 60]:
-                mv = session.query(ModelVersion).filter(
-                    ModelVersion.period_days == period
-                ).order_by(ModelVersion.created_at.desc()).first()
-                version = mv.version if mv else '--'
-                runtime_bundle = _MODEL_MANAGER.load_runtime_model_bundle(runtime_files.get(period, ''), period_days=period, allow_legacy=None)
-                metadata = runtime_bundle.get('metadata') or {}
-
-                if metadata:
-                    metrics = {
-                        'accuracy': _safe_float(metadata.get('validation_accuracy'), None),
-                        'f1': _safe_float(metadata.get('validation_f1'), None),
-                        'auc': _safe_float(metadata.get('validation_auc'), None),
-                        'brier': _safe_float(metadata.get('validation_brier'), None),
-                    }
-                    passed, gate, _ = _MODEL_MANAGER.evaluate_validation_gate(period, metadata)
-                    version = metadata.get('version', version)
-                elif mv:
-                    params = {}
-                    try:
-                        params = json.loads(mv.params) if mv.params else {}
-                    except Exception:
-                        params = {}
-                    metrics = {
-                        'accuracy': _safe_float(params.get('validation_accuracy', mv.validation_accuracy), None),
-                        'f1': _safe_float(params.get('validation_f1'), None),
-                        'auc': _safe_float(params.get('validation_auc'), None),
-                        'brier': _safe_float(params.get('validation_brier'), None),
-                    }
-                    passed, gate, _ = _MODEL_MANAGER.evaluate_validation_gate(period, metrics)
-                else:
-                    metrics = {'accuracy': None, 'f1': None}
-                    passed = False
-                    gate = 'missing'
-
-                if passed:
-                    passed_count += 1
-                model_rows.append({
-                    'period_days': period,
-                    'passed': bool(passed),
-                    'version': version,
-                    'gate': gate,
-                    'accuracy': metrics.get('accuracy'),
-                    'f1': metrics.get('f1')
-                })
-            model_health = {
-                'overall_status': 'healthy' if passed_count == len(model_rows) else ('warning' if passed_count > 0 else 'risk'),
-                'passed_count': passed_count,
-                'total_models': len(model_rows),
-                'models': model_rows,
-            }
+            model_health = _get_model_health_overview()
 
             # 动作回测摘要
             action_backtest = _get_cached_action_backtest_summary()
@@ -451,6 +518,7 @@ def register_dashboard_routes(app):
                 'total': today_warnings,
                 'high': high_warnings,
                 'medium': medium_warnings,
+                'low': low_warnings,
             }
             advisor_brief = _build_advisor_brief(
                 market_temperature,
@@ -489,7 +557,8 @@ def register_dashboard_routes(app):
                     'today_warnings': {
                         'total': today_warnings,
                         'high': high_warnings,
-                        'medium': medium_warnings
+                        'medium': medium_warnings,
+                        'low': low_warnings,
                     },
                     'today_recommendations': {
                         'total': today_recommendations,
